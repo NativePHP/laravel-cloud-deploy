@@ -7,6 +7,7 @@ namespace NativePhp\LaravelCloudDeploy;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
+use NativePhp\LaravelCloudDeploy\Enums\CommandStatus;
 
 class CloudClient
 {
@@ -421,6 +422,17 @@ class CloudClient
     public function getCommand(string $commandId): array
     {
         return $this->http->get("/commands/{$commandId}")->json();
+    }
+
+    /**
+     * Get the status of a command as an enum.
+     */
+    public function getCommandStatus(string $commandId): CommandStatus
+    {
+        $command = $this->getCommand($commandId);
+        $status = $command['data']['attributes']['status'] ?? 'pending';
+
+        return CommandStatus::from($status);
     }
 
     /**

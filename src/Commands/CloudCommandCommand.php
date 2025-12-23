@@ -7,6 +7,7 @@ namespace NativePhp\LaravelCloudDeploy\Commands;
 use Illuminate\Console\Command;
 use Illuminate\Http\Client\RequestException;
 use NativePhp\LaravelCloudDeploy\CloudClient;
+use NativePhp\LaravelCloudDeploy\Enums\CommandStatus;
 
 class CloudCommandCommand extends Command
 {
@@ -160,15 +161,14 @@ class CloudCommandCommand extends Command
         $attempt = 0;
 
         while ($attempt < $maxAttempts) {
-            $command = $this->client->getCommand($commandId);
-            $attrs = $command['data']['attributes'] ?? [];
-            $status = $attrs['status'] ?? 'unknown';
+            $status = $this->client->getCommandStatus($commandId);
 
-            if (in_array($status, ['command.success', 'command.failure'])) {
+            if ($status->isTerminal()) {
                 $this->newLine();
+                $command = $this->client->getCommand($commandId);
                 $this->showCommandDetails($command['data']);
 
-                return $status === 'command.success' ? self::SUCCESS : self::FAILURE;
+                return $status->isSuccessful() ? self::SUCCESS : self::FAILURE;
             }
 
             $attempt++;
@@ -198,14 +198,9 @@ class CloudCommandCommand extends Command
     protected function showCommandDetails(array $command): void
     {
         $attrs = $command['attributes'] ?? [];
-        $status = $attrs['status'] ?? 'unknown';
-
-        $statusColor = match ($status) {
-            'command.success' => 'green',
-            'command.failure' => 'red',
-            'command.running', 'command.created', 'pending' => 'yellow',
-            default => 'gray',
-        };
+        $statusValue = $attrs['status'] ?? 'pending';
+        $status = CommandStatus::tryFrom($statusValue);
+        $statusColor = $status?->color() ?? 'gray';
 
         $this->newLine();
         $this->info('Command Details');
@@ -213,7 +208,7 @@ class CloudCommandCommand extends Command
 
         $this->line('  <fg=gray>ID:</> '.$command['id']);
         $this->line('  <fg=gray>Command:</> '.($attrs['command'] ?? 'N/A'));
-        $this->line("  <fg=gray>Status:</> <fg={$statusColor}>{$status}</>");
+        $this->line("  <fg=gray>Status:</> <fg={$statusColor}>{$statusValue}</>");
         $this->line('  <fg=gray>Created:</> '.($attrs['created_at'] ?? 'N/A'));
 
         if (isset($attrs['finished_at'])) {
@@ -271,14 +266,12 @@ class CloudCommandCommand extends Command
         return self::SUCCESS;
     }
 
-    protected function formatStatus(string $status): string
+    protected function formatStatus(string $statusValue): string
     {
-        return match ($status) {
-            'command.success' => '<fg=green>'.$status.'</>',
-            'command.failure' => '<fg=red>'.$status.'</>',
-            'command.running', 'command.created', 'pending' => '<fg=yellow>'.$status.'</>',
-            default => $status,
-        };
+        $status = CommandStatus::tryFrom($statusValue);
+        $color = $status?->color() ?? 'gray';
+
+        return "<fg={$color}>{$statusValue}</>";
     }
 
     protected function truncate(string $text, int $length): string
