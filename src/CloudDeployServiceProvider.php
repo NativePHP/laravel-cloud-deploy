@@ -6,6 +6,7 @@ namespace NativePhp\LaravelCloudDeploy;
 
 use Illuminate\Support\ServiceProvider;
 use NativePhp\LaravelCloudDeploy\Commands\CloudAppCommand;
+use NativePhp\LaravelCloudDeploy\Commands\CloudCommandCommand;
 use NativePhp\LaravelCloudDeploy\Commands\CloudDatabasesCommand;
 use NativePhp\LaravelCloudDeploy\Commands\CloudDeployCommand;
 use NativePhp\LaravelCloudDeploy\Commands\CloudStatusCommand;
@@ -35,6 +36,7 @@ class CloudDeployServiceProvider extends ServiceProvider
 
             $this->commands([
                 CloudAppCommand::class,
+                CloudCommandCommand::class,
                 CloudDatabasesCommand::class,
                 CloudDeployCommand::class,
                 CloudStatusCommand::class,
