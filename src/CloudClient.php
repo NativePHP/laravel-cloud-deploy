@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Http;
 
 class CloudClient
 {
-    protected string $baseUrl = 'https://cloud.laravel.com/api';
+    protected string $baseUrl = 'https://app.laravel.cloud/api';
 
     protected PendingRequest $http;
 
@@ -441,5 +441,83 @@ class CloudClient
     public function getIpAddresses(): array
     {
         return $this->http->get('/ip')->json();
+    }
+
+    /**
+     * List all database clusters.
+     *
+     * @return array<string, mixed>
+     */
+    public function listDatabaseClusters(): array
+    {
+        return $this->http->get('/databases')->json();
+    }
+
+    /**
+     * Find a database cluster by name.
+     */
+    public function findDatabaseClusterByName(string $name): ?array
+    {
+        $clusters = $this->listDatabaseClusters();
+
+        foreach ($clusters['data'] ?? [] as $cluster) {
+            if (($cluster['attributes']['name'] ?? null) === $name) {
+                return $cluster;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Create a new database cluster.
+     *
+     * @param  array{type: string, name: string, region: string, config: array<string, mixed>}  $data
+     * @return array<string, mixed>
+     */
+    public function createDatabaseCluster(array $data): array
+    {
+        return $this->http->post('/databases', $data)->json();
+    }
+
+    /**
+     * Get a database cluster by ID.
+     *
+     * @return array<string, mixed>
+     */
+    public function getDatabaseCluster(string $clusterId): array
+    {
+        return $this->http->get("/databases/{$clusterId}")->json();
+    }
+
+    /**
+     * Update a database cluster.
+     *
+     * @param  array<string, mixed>  $data
+     * @return array<string, mixed>
+     */
+    public function updateDatabaseCluster(string $clusterId, array $data): array
+    {
+        return $this->http->patch("/databases/{$clusterId}", $data)->json();
+    }
+
+    /**
+     * Delete a database cluster.
+     */
+    public function deleteDatabaseCluster(string $clusterId): Response
+    {
+        return $this->http->delete("/databases/{$clusterId}");
+    }
+
+    /**
+     * Get a database cluster with schemas included.
+     *
+     * @return array<string, mixed>
+     */
+    public function getDatabaseClusterWithSchemas(string $clusterId): array
+    {
+        return $this->http->get("/databases/{$clusterId}", [
+            'include' => 'schemas',
+        ])->json();
     }
 }

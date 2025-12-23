@@ -328,4 +328,56 @@ return [
 
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Database Clusters
+    |--------------------------------------------------------------------------
+    |
+    | Configure database clusters for your application. Clusters are shared
+    | across environments - each environment gets its own schema within
+    | the cluster when attached.
+    |
+    | Supported types:
+    |   - "laravel_mysql_8"              (Laravel MySQL 8 - Serverless)
+    |   - "aws_rds_mysql_8"              (AWS RDS MySQL 8)
+    |   - "neon_serverless_postgres_18"  (Neon Serverless Postgres 18)
+    |   - "neon_serverless_postgres_17"  (Neon Serverless Postgres 17)
+    |   - "neon_serverless_postgres_16"  (Neon Serverless Postgres 16)
+    |
+    */
+
+    'databases' => [
+
+        // 'main' => [
+        //     'type' => 'laravel_mysql_8',
+        //     'region' => env('LARAVEL_CLOUD_REGION', 'us-east-2'),
+        //
+        //     // Serverless configuration (Laravel MySQL / Neon Postgres)
+        //     'config' => [
+        //         'cu_min' => 0.25,        // Minimum compute units
+        //         'cu_max' => 1,           // Maximum compute units
+        //         'suspend_seconds' => 300, // Suspend after idle (0-604800)
+        //         'retention_days' => 7,   // Backup retention (0-30)
+        //     ],
+        //
+        //     // Attach to environments (creates a schema per environment)
+        //     'environments' => ['production'],
+        // ],
+
+        // Example: AWS RDS MySQL configuration
+        // 'rds-database' => [
+        //     'type' => 'aws_rds_mysql_8',
+        //     'region' => 'us-east-2',
+        //     'config' => [
+        //         'size' => 'db-flex.m-1vcpu-1gb',
+        //         'storage' => 20,          // GB (5-1000)
+        //         'is_public' => false,
+        //         'uses_scheduled_snapshots' => true,
+        //         'retention_days' => 7,
+        //     ],
+        //     'environments' => ['production'],
+        // ],
+
+    ],
+
 ];
