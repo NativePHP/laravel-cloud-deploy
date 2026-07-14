@@ -168,7 +168,11 @@ return [
             | can have its own size, scaling configuration, and background
             | processes like queue workers.
             |
-            | Sizes: "flex.c-1vcpu-256mb", "flex.c-1vcpu-512mb", etc.
+            | Sizes: "flex-256mb", "flex-512mb", "flex-1gb", etc.
+            |
+            | Note: Cloud automatically provisions a default app instance
+            | (named "App", flex-512mb) with every new environment, and an
+            | environment can only have one app-type instance.
             |
             | Scaling types:
             |   - "none"   : Fixed number of replicas
@@ -181,7 +185,7 @@ return [
 
                 'App' => [
                     'type' => 'app',
-                    'size' => 'flex.g-1vcpu-512mb',
+                    'size' => 'flex-512mb',
 
                     'scaling' => [
                         'type' => 'none',
@@ -247,7 +251,7 @@ return [
                 // Example: Dedicated worker instance (separate from web)
                 // 'worker' => [
                 //     'type' => 'service',
-                //     'size' => 'flex.c-1vcpu-512mb',
+                //     'size' => 'flex-512mb',
                 //     'scaling' => [
                 //         'type' => 'auto',
                 //         'min_replicas' => 1,
