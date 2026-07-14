@@ -86,6 +86,14 @@ class CloudClient
     }
 
     /**
+     * Delete an application.
+     */
+    public function deleteApplication(string $applicationId): Response
+    {
+        return $this->http->delete("/applications/{$applicationId}");
+    }
+
+    /**
      * List environments for an application.
      *
      * @return array<string, mixed>
@@ -391,8 +399,12 @@ class CloudClient
                 $lastStatus = $status;
             }
 
-            // Check for terminal statuses (various formats returned by API)
-            if (in_array($status, ['deployed', 'failed', 'deployment.succeeded', 'deployment.failed'])) {
+            // Check for terminal statuses. The API reports stage-dotted
+            // failures (build.failed, deployment.failed, ...) — every one of
+            // them is terminal, while only the deployment stage succeeding
+            // means the deploy is done.
+            if (in_array($status, ['deployed', 'deployment.succeeded', 'failed'])
+                || str_ends_with($status, '.failed')) {
                 return $deployment;
             }
 
