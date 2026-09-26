@@ -11,7 +11,6 @@ use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
 use NativePhp\LaravelCloudDeploy\Migration\Remote\RemoteShell;
 use NativePhp\LaravelCloudDeploy\Migration\Remote\SshAccess;
 use NativePhp\LaravelCloudDeploy\Migration\Support\BucketUploader;
-use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 use NativePhp\LaravelCloudDeploy\Migration\Support\FileSyncScripts;
 use NativePhp\LaravelCloudDeploy\Migration\Support\Spinner;
 
@@ -112,7 +111,7 @@ class FilesStep extends Step
         $targets = [];
 
         foreach ($context->cloudConfig()['buckets'] ?? [] as $key => $bucket) {
-            if (! in_array(ConfigGenerator::ENVIRONMENT, $bucket['environments'] ?? [], true)) {
+            if (! in_array($context->environmentName(), $bucket['environments'] ?? [], true)) {
                 continue;
             }
 

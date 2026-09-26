@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigFile;
+use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigRenderer;
 use NativePhp\LaravelCloudDeploy\Migration\Support\DatabaseScripts;
 use NativePhp\LaravelCloudDeploy\Migration\Support\DeployScriptParser;
@@ -268,4 +270,28 @@ test('file sync scripts pass credentials through the environment', function () {
     expect(FileSyncScripts::aws('/home/forge/example.com', 'storage/app/public', [], $bucket))
         ->toContain('AWS_SECRET_ACCESS_KEY="$SECRET"')
         ->toContain('aws s3 sync \'storage/app/public\' "s3://$BUCKET" --endpoint-url "$ENDPOINT"');
+});
+
+test('existing config files load with their env() calls intact', function () {
+    $path = tempnam(sys_get_temp_dir(), 'cfg').'.php';
+    file_put_contents($path, "<?php\n// env('NOT_A_CALL')\nreturn ['token' => env('LARAVEL_CLOUD_TOKEN'), 'region' => \\env('REGION', 'us-east-2'), 'n' => \$x->env ?? 1];\n");
+    putenv('LARAVEL_CLOUD_TOKEN=secret');
+
+    $config = ConfigFile::load($path);
+
+    expect($config['token'])->toBeInstanceOf(EnvExpression::class)
+        ->and($config['token']->toPhp())->toBe("env('LARAVEL_CLOUD_TOKEN')")
+        ->and($config['region']->toPhp())->toBe("env('REGION', 'us-east-2')")
+        ->and(ConfigRenderer::render($config))->not->toContain('secret');
+
+    putenv('LARAVEL_CLOUD_TOKEN');
+    unlink($path);
+});
+
+test('environment names are suggested from the branch', function () {
+    expect(ConfigGenerator::suggestEnvironment('main'))->toBe('production')
+        ->and(ConfigGenerator::suggestEnvironment('main', ['production']))->toBe('staging')
+        ->and(ConfigGenerator::suggestEnvironment('staging', ['production']))->toBe('staging')
+        ->and(ConfigGenerator::suggestEnvironment('feature/Big Thing'))->toBe('feature-big-thing')
+        ->and(ConfigGenerator::suggestEnvironment('staging', ['staging']))->toBe('staging-forge');
 });

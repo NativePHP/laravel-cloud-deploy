@@ -139,6 +139,7 @@ test('a dry run inspects the site and prints the config without creating anythin
         ->expectsOutputToContain('Migrates')
         ->expectsQuestion('Which Cloud region should the app run in?', 'eu-west-2')
         ->expectsQuestion('What should the application be called in Cloud?', 'Shop')
+        ->expectsQuestion('What should the Cloud environment be called?', 'production')
         ->expectsConfirmation('Create a public bucket for storage/app/public?', 'yes')
         ->expectsConfirmation('Create a private bucket for other files in storage/app?', 'no')
         ->expectsOutputToContain("'repository' => 'acme/shop'")
@@ -174,6 +175,7 @@ test('a stopped run resumes at the next step', function () {
         ->expectsQuestion('You\'ve done 4 of 11 steps. Next up: Write config/cloud.php.', 'resume')
         ->expectsQuestion('Which Cloud region should the app run in?', 'eu-west-2')
         ->expectsQuestion('What should the application be called in Cloud?', 'Shop')
+        ->expectsQuestion('What should the Cloud environment be called?', 'production')
         ->expectsConfirmation('Create a public bucket for storage/app/public?', 'no')
         ->expectsConfirmation('Create a private bucket for other files in storage/app?', 'no')
         ->expectsConfirmation('Continue to creating the resources in Cloud?', 'no')
@@ -256,4 +258,76 @@ test('provisioning explains the Git provider again when the application cannot b
         ->assertExitCode(0);
 
     expect(migrationState($this->project)->get('migration.steps.provision'))->toBeNull();
+});
+
+test('a site whose repository already has a Cloud app is added to it as a new environment', function () {
+    prepareMigration($this->project, ['setup', 'site', 'inspect', 'report']);
+
+    // The existing config for the production environment of the same app.
+    file_put_contents($this->project.'/config/cloud.php', <<<'PHP'
+<?php
+
+return [
+    'token' => env('LARAVEL_CLOUD_TOKEN'),
+    'application' => ['name' => 'Shop', 'repository' => 'acme/shop', 'source_control' => 'github', 'region' => 'eu-west-2'],
+    'environments' => [
+        'production' => ['branch' => 'main', 'php' => '8.4:1'],
+    ],
+    'variables' => ['global' => ['APP_NAME' => env('APP_NAME', 'Shop')], 'production' => []],
+    'databases' => ['shop-db' => ['type' => 'laravel_mysql', 'environments' => ['production' => 'shop']]],
+];
+PHP);
+
+    $state = migrationState($this->project);
+    $state->set('migration.inspection.site.repository.branch', 'develop');
+    $state->save();
+
+    FakeApis::fake(cloud: [
+        'GET /applications' => ['data' => [[
+            'id' => 'app-1', 'type' => 'applications',
+            'attributes' => ['name' => 'Shop', 'region' => 'eu-west-2', 'repository' => ['full_name' => 'acme/shop', 'default_branch' => 'main']],
+        ]]],
+        'GET /applications/app-1/environments' => ['data' => [['id' => 'env-prod', 'attributes' => ['name' => 'production']]]],
+    ]);
+
+    putenv('LARAVEL_CLOUD_TOKEN=secret-token-value');
+
+    $this->artisan('cloud:migrate-from-forge', ['--step' => 'config'])
+        ->expectsConfirmation('Add this site to "Shop" as a new environment?', 'yes')
+        ->expectsQuestion('What should the Cloud environment be called?', 'develop')
+        ->expectsConfirmation('Create a public bucket for storage/app/public?', 'no')
+        ->expectsConfirmation('Create a private bucket for other files in storage/app?', 'no')
+        ->expectsConfirmation('Add the "develop" environment to config/cloud.php? Other environments stay as they are, but comments in the file aren\'t kept.', 'yes')
+        ->expectsConfirmation('Continue to creating the resources in Cloud?', 'no')
+        ->assertExitCode(0);
+
+    putenv('LARAVEL_CLOUD_TOKEN');
+
+    $written = file_get_contents($this->project.'/config/cloud.php');
+    $config = require $this->project.'/config/cloud.php';
+
+    expect($written)->toContain("'token' => env('LARAVEL_CLOUD_TOKEN'),")
+        ->toContain("env('APP_NAME', 'Shop')")
+        ->not->toContain('secret-token-value')
+        ->and(array_keys($config['environments']))->toBe(['production', 'develop'])
+        ->and($config['environments']['production'])->toBe(['branch' => 'main', 'php' => '8.4:1'])
+        ->and($config['environments']['develop']['branch'])->toBe('develop')
+        ->and(array_keys($config['databases']))->toBe(['shop-db', 'shop-develop-db'])
+        ->and($config['databases']['shop-develop-db']['environments'])->toBe(['develop' => 'shop'])
+        ->and(migrationState($this->project)->get('migration.plan.environment'))->toBe('develop');
+});
+
+test('adding to an existing app refuses an environment name it already has', function () {
+    prepareMigration($this->project, ['setup', 'site', 'inspect', 'report']);
+
+    FakeApis::fake(cloud: [
+        'GET /applications' => ['data' => [['id' => 'app-1', 'attributes' => ['name' => 'Shop', 'region' => 'eu-west-2', 'repository' => ['full_name' => 'acme/shop']]]]],
+        'GET /applications/app-1/environments' => ['data' => [['id' => 'env-prod', 'attributes' => ['name' => 'production']]]],
+    ]);
+
+    $this->artisan('cloud:migrate-from-forge', ['--step' => 'config'])
+        ->expectsConfirmation('Add this site to "Shop" as a new environment?', 'yes')
+        ->expectsQuestion('What should the Cloud environment be called?', 'production')
+        ->expectsOutputToContain('The app already has a "production" environment.')
+        ->assertFailed();
 });

@@ -8,7 +8,6 @@ use Illuminate\Support\Facades\Http;
 use NativePhp\LaravelCloudDeploy\Enums\DeploymentStatus;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
-use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 
 use function Laravel\Prompts\confirm;
 
@@ -51,7 +50,7 @@ class DeployStep extends Step
         $environmentId = $context->environmentId();
 
         $deploymentId = $cloud->initiateDeployment($environmentId)['data']['id'];
-        $context->state->setLastDeploymentId(ConfigGenerator::ENVIRONMENT, $deploymentId);
+        $context->state->setLastDeploymentId($context->environmentName(), $deploymentId);
         $context->save();
 
         $context->command->line("  Deployment {$deploymentId} started. Waiting for it to finish (this usually takes a few minutes)...");

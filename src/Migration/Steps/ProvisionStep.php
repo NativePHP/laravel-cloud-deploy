@@ -6,7 +6,6 @@ namespace NativePhp\LaravelCloudDeploy\Migration\Steps;
 
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
-use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 use NativePhp\LaravelCloudDeploy\Migration\Support\SourceControl;
 
 use function Laravel\Prompts\confirm;
@@ -46,7 +45,7 @@ class ProvisionStep extends Step
             // cloud:deploy reads and writes the same state file, so save first and reload after.
             $context->save();
             $exitCode = $context->command->call('cloud:deploy', [
-                'environment' => ConfigGenerator::ENVIRONMENT,
+                'environment' => $context->environmentName(),
                 '--skip-deploy' => true,
                 '--force' => true,
             ]);

@@ -11,8 +11,17 @@ class EnvExpression
 {
     public function __construct(
         public readonly string $key,
-        public readonly ?string $default = null,
+        public readonly mixed $default = null,
     ) {}
+
+    /**
+     * Stands in for env() when ConfigFile loads an existing config, so the
+     * call is kept rather than replaced with the value (maybe a secret).
+     */
+    public static function capture(string $key, mixed $default = null): self
+    {
+        return new self($key, $default);
+    }
 
     public function toPhp(): string
     {

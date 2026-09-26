@@ -109,11 +109,21 @@ class MigrationContext
     }
 
     /**
+     * The Cloud environment the Forge site becomes ("production" unless the
+     * user picked another name, e.g. when adding a staging site to an
+     * existing app).
+     */
+    public function environmentName(): string
+    {
+        return $this->get('plan.environment') ?? ConfigGenerator::ENVIRONMENT;
+    }
+
+    /**
      * The Cloud environment's ID, once provisioning has created it.
      */
     public function environmentId(): string
     {
-        return $this->state->getEnvironmentId(ConfigGenerator::ENVIRONMENT)
+        return $this->state->getEnvironmentId($this->environmentName())
             ?? throw new MigrationException('The Cloud environment doesn\'t exist yet.', [
                 'Run the provision step first: php artisan cloud:migrate-from-forge --step=provision',
             ]);

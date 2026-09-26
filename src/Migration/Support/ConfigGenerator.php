@@ -39,12 +39,13 @@ class ConfigGenerator
 
     /**
      * @param  array<string, mixed>  $inspection
-     * @param  array{app_name: string, region: string, public_bucket?: bool, private_bucket?: bool}  $plan
+     * @param  array{app_name: string, region: string, environment?: string, public_bucket?: bool, private_bucket?: bool}  $plan
      * @return array<string, mixed>
      */
     public static function generate(array $inspection, array $plan): array
     {
-        $names = self::resourceNames($plan['app_name']);
+        $environment = $plan['environment'] ?? self::ENVIRONMENT;
+        $names = self::resourceNames($plan['app_name'], $environment);
         $env = $inspection['env']['facts'] ?? [];
         $integrations = $inspection['integrations'] ?? [];
         $processes = collect($inspection['processes'] ?? []);
@@ -62,7 +63,7 @@ class ConfigGenerator
                 'region' => $plan['region'],
             ],
             'environments' => [
-                self::ENVIRONMENT => [
+                $environment => [
                     'branch' => $inspection['site']['repository']['branch'] ?: 'main',
                     'push_to_deploy' => $inspection['site']['quick_deploy'] ?? true,
                     'php' => self::phpVersion($inspection['server']['php_version'] ?? null),
@@ -89,7 +90,7 @@ class ConfigGenerator
             ],
             'variables' => [
                 'global' => [],
-                self::ENVIRONMENT => [],
+                $environment => [],
             ],
             'databases' => [],
             'caches' => [],
@@ -109,7 +110,7 @@ class ConfigGenerator
                     'uses_scheduled_snapshots' => true,
                     'retention_days' => 7,
                 ],
-                'environments' => [self::ENVIRONMENT => self::schemaName($database['name'] ?? null)],
+                'environments' => [$environment => self::schemaName($database['name'] ?? null)],
             ];
         } elseif (($database['engine'] ?? null) === 'pgsql') {
             $config['databases'][$names['database']] = [
@@ -122,7 +123,7 @@ class ConfigGenerator
                     'suspend_seconds' => 0,
                     'retention_days' => 7,
                 ],
-                'environments' => [self::ENVIRONMENT => self::schemaName($database['name'] ?? null)],
+                'environments' => [$environment => self::schemaName($database['name'] ?? null)],
             ];
         }
 
@@ -133,7 +134,7 @@ class ConfigGenerator
                 'region' => $plan['region'],
                 'auto_upgrade_enabled' => true,
                 'is_public' => false,
-                'environments' => [self::ENVIRONMENT],
+                'environments' => [$environment],
             ];
         }
 
@@ -143,7 +144,7 @@ class ConfigGenerator
                 'jurisdiction' => 'default',
                 'disk' => 'public',
                 'default' => false,
-                'environments' => [self::ENVIRONMENT],
+                'environments' => [$environment],
             ];
         }
 
@@ -153,7 +154,7 @@ class ConfigGenerator
                 'jurisdiction' => 'default',
                 'disk' => 's3',
                 'default' => true,
-                'environments' => [self::ENVIRONMENT],
+                'environments' => [$environment],
             ];
         }
 
@@ -161,13 +162,61 @@ class ConfigGenerator
     }
 
     /**
+     * Add a generated environment (and its resources) to an existing config
+     * for the same application, leaving everything else as it is.
+     *
+     * @param  array<string, mixed>  $existing
+     * @param  array<string, mixed>  $generated
+     * @return array<string, mixed>
+     */
+    public static function merge(array $existing, array $generated, string $environment): array
+    {
+        $merged = $existing;
+        $merged['token'] ??= $generated['token'];
+        $merged['forge'] ??= $generated['forge'];
+        $merged['environments'][$environment] = $generated['environments'][$environment];
+        $merged['variables'][$environment] ??= [];
+
+        foreach (['databases', 'caches', 'buckets'] as $section) {
+            $merged[$section] = ($existing[$section] ?? []) + ($generated[$section] ?? []);
+        }
+
+        return $merged;
+    }
+
+    /**
+     * A name for the Cloud environment based on the branch the site deploys.
+     *
+     * @param  array<int, string>  $taken
+     */
+    public static function suggestEnvironment(?string $branch, array $taken = []): string
+    {
+        $name = in_array($branch, [null, '', 'main', 'master', 'production', 'prod'], true)
+            ? self::ENVIRONMENT
+            : Str::slug(str_replace('/', '-', (string) $branch));
+
+        if ($name === self::ENVIRONMENT && in_array($name, $taken, true)) {
+            $name = 'staging';
+        }
+
+        return in_array($name, $taken, true) ? "{$name}-forge" : $name;
+    }
+
+    /**
      * The config keys (and Cloud names) used for the app's resources.
+     *
+     * Environments other than production get their own resources, named
+     * after the environment, so a staging copy never shares production data.
      *
      * @return array{database: string, cache: string, public_bucket: string, private_bucket: string}
      */
-    public static function resourceNames(string $appName): array
+    public static function resourceNames(string $appName, string $environment = self::ENVIRONMENT): array
     {
         $slug = Str::slug($appName) ?: 'app';
+
+        if ($environment !== self::ENVIRONMENT) {
+            $slug .= '-'.Str::slug($environment);
+        }
 
         return [
             'database' => "{$slug}-db",

@@ -6,7 +6,6 @@ namespace NativePhp\LaravelCloudDeploy\Migration\Steps;
 
 use Illuminate\Support\Sleep;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
-use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 
 use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\multiselect;
@@ -146,7 +145,7 @@ class CutoverStep extends Step
                 'wildcard_enabled' => $domain['wildcard'] ?? false,
             ], fn ($value) => $value !== null))['data']['id'];
 
-            $context->state->setDomainId(ConfigGenerator::ENVIRONMENT, $domain['name'], $id);
+            $context->state->setDomainId($context->environmentName(), $domain['name'], $id);
             $context->save();
         }
 
@@ -160,7 +159,7 @@ class CutoverStep extends Step
      */
     protected function waitForDomains(MigrationContext $context): bool
     {
-        $domainIds = $context->state->get('environments.'.ConfigGenerator::ENVIRONMENT.'.domains', []);
+        $domainIds = $context->state->get('environments.'.$context->environmentName().'.domains', []);
 
         if ($domainIds === []) {
             return true;
@@ -258,7 +257,7 @@ class CutoverStep extends Step
     protected function updateAppUrl(MigrationContext $context): void
     {
         $primary = collect($context->inspection()['domains'])->firstWhere('type', 'primary')['name'] ?? null;
-        $moved = array_keys($context->state->get('environments.'.ConfigGenerator::ENVIRONMENT.'.domains', []));
+        $moved = array_keys($context->state->get('environments.'.$context->environmentName().'.domains', []));
 
         if (! $primary || ! in_array($primary, $moved, true)) {
             return;

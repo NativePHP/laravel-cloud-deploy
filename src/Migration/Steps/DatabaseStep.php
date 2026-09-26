@@ -9,7 +9,6 @@ use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
 use NativePhp\LaravelCloudDeploy\Migration\Remote\RemoteShell;
 use NativePhp\LaravelCloudDeploy\Migration\Remote\SshAccess;
-use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 use NativePhp\LaravelCloudDeploy\Migration\Support\DatabaseScripts;
 use NativePhp\LaravelCloudDeploy\Migration\Support\EnvFile;
 use NativePhp\LaravelCloudDeploy\Migration\Support\Spinner;
@@ -172,11 +171,13 @@ class DatabaseStep extends Step
      */
     protected function cloudDatabase(MigrationContext $context): array
     {
+        $name = $context->environmentName();
+
         foreach ($context->cloudConfig()['databases'] ?? [] as $key => $database) {
             $environments = $database['environments'] ?? [];
             $schema = array_is_list($environments)
-                ? (in_array(ConfigGenerator::ENVIRONMENT, $environments, true) ? ConfigGenerator::ENVIRONMENT : null)
-                : ($environments[ConfigGenerator::ENVIRONMENT] ?? null);
+                ? (in_array($name, $environments, true) ? $name : null)
+                : ($environments[$name] ?? null);
 
             $clusterId = $context->state->get("resources.databases.{$key}.id");
 
@@ -185,7 +186,7 @@ class DatabaseStep extends Step
             }
         }
 
-        throw new MigrationException('There is no Cloud database attached to the production environment yet.', [
+        throw new MigrationException("There is no Cloud database attached to the {$name} environment yet.", [
             'Check the databases section of config/cloud.php, then run: php artisan cloud:migrate-from-forge --step=provision',
         ]);
     }

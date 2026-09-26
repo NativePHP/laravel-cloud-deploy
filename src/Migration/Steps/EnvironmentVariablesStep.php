@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace NativePhp\LaravelCloudDeploy\Migration\Steps;
 
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
-use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 use NativePhp\LaravelCloudDeploy\Migration\Support\EnvFile;
 use NativePhp\LaravelCloudDeploy\Migration\Support\EnvironmentVariableFilter;
 
@@ -46,11 +45,13 @@ class EnvironmentVariablesStep extends Step
             (string) $context->get('forge.site_id'),
         ));
 
+        $name = $context->environmentName();
+
         $result = EnvironmentVariableFilter::filter($variables, [
-            'database' => self::attachesTo($config['databases'] ?? []),
-            'cache' => self::attachesTo($config['caches'] ?? []),
-            'bucket' => self::attachesTo($config['buckets'] ?? []),
-            'managed_queue' => collect($config['environments'][ConfigGenerator::ENVIRONMENT]['instances'] ?? [])->contains('type', 'managed_queue'),
+            'database' => self::attachesTo($config['databases'] ?? [], $name),
+            'cache' => self::attachesTo($config['caches'] ?? [], $name),
+            'bucket' => self::attachesTo($config['buckets'] ?? [], $name),
+            'managed_queue' => collect($config['environments'][$name]['instances'] ?? [])->contains('type', 'managed_queue'),
             'app_url' => $vanity ? 'https://'.preg_replace('#^https?://#', '', $vanity) : null,
         ]);
 
@@ -86,16 +87,16 @@ class EnvironmentVariablesStep extends Step
     }
 
     /**
-     * Whether any resource in a config section is attached to production.
+     * Whether any resource in a config section is attached to an environment.
      *
      * @param  array<string, array<string, mixed>>  $resources
      */
-    public static function attachesTo(array $resources): bool
+    public static function attachesTo(array $resources, string $environment): bool
     {
         foreach ($resources as $resource) {
             $environments = $resource['environments'] ?? [];
 
-            if (in_array(ConfigGenerator::ENVIRONMENT, $environments, true) || isset($environments[ConfigGenerator::ENVIRONMENT])) {
+            if (array_is_list($environments) ? in_array($environment, $environments, true) : isset($environments[$environment])) {
                 return true;
             }
         }
