@@ -30,18 +30,25 @@ Add your Laravel Cloud API token to your `.env` file:
 LARAVEL_CLOUD_TOKEN=your-api-token
 LARAVEL_CLOUD_REPOSITORY=owner/repo
 LARAVEL_CLOUD_REGION=us-east-2
+LARAVEL_CLOUD_SOURCE_CONTROL=github
 ```
 
-Generate an API token at: https://cloud.laravel.com/org/my-team/settings/api-tokens
+Generate an API token in your Laravel Cloud organization settings, under "API tokens". `LARAVEL_CLOUD_SOURCE_CONTROL`
+defaults to `github`; the other options are `gitlab`, `gitlab_self_hosted` and `bitbucket`. The provider has to be
+connected to your Cloud organization before the application can be created.
 
 ### Supported Regions
 
 - `us-east-2` (Ohio)
 - `us-east-1` (N. Virginia)
+- `ca-central-1` (Canada)
+- `eu-west-1` (Ireland)
 - `eu-west-2` (London)
 - `eu-central-1` (Frankfurt)
+- `me-central-1` (UAE)
 - `ap-southeast-1` (Singapore)
 - `ap-southeast-2` (Sydney)
+- `ap-northeast-1` (Tokyo)
 
 ## Usage
 
@@ -93,8 +100,8 @@ The `config/cloud.php` file allows you to define:
 - **Environments**: Production, staging, or custom environments
 - **PHP/Node versions**: Specify versions for each environment
 - **Build & deploy commands**: Custom build and deployment scripts
-- **Server configuration**: Web server, Octane, hibernation settings
-- **Network settings**: Caching, response headers, firewall rules
+- **Server configuration**: Octane, request timeout, per-instance hibernation
+- **Network settings**: Caching, response headers, firewall settings
 - **Instances**: Compute resources with scaling configuration
 - **Background processes**: Queue workers and custom processes
 - **Domains**: Custom domains with SSL and WWW redirects

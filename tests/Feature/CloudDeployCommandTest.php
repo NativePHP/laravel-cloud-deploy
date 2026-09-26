@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use NativePhp\LaravelCloudDeploy\CloudState;
 
@@ -230,5 +231,160 @@ test('skip-deploy option configures without deploying', function () {
 
     $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
         ->doesntExpectOutputToContain('Initiating deployment')
+        ->assertExitCode(0);
+});
+
+test('new applications are created with a source control provider', function () {
+    config(['cloud.token' => 'test-token']);
+    config(['cloud.application.repository' => 'owner/repo']);
+    config(['cloud.application.name' => 'Test App']);
+    config(['cloud.application.region' => 'eu-west-2']);
+    config(['cloud.environments' => ['production' => ['branch' => 'main']]]);
+
+    Http::fake(function (Request $request) {
+        if ($request->method() === 'GET' && str_ends_with($request->url(), '/applications')) {
+            return Http::response(['data' => []]);
+        }
+
+        if ($request->method() === 'POST' && str_ends_with($request->url(), '/applications')) {
+            return Http::response(['data' => ['id' => 'app-new']], 201);
+        }
+
+        if (str_ends_with($request->url(), '/applications/app-new/environments')) {
+            return $request->method() === 'GET'
+                ? Http::response(['data' => []])
+                : Http::response(['data' => ['id' => 'env-new']], 201);
+        }
+
+        return Http::response(['data' => []]);
+    });
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
+        ->assertExitCode(0);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && str_ends_with($request->url(), '/applications')
+        && $request['source_control_provider_type'] === 'github'
+        && $request['repository'] === 'owner/repo');
+});
+
+test('deploy sends spec-shaped environment, variable, instance and domain payloads', function () {
+    config(['cloud.token' => 'test-token']);
+    config(['cloud.application.repository' => 'owner/repo']);
+    config(['cloud.variables' => ['global' => ['APP_DEBUG' => 'false'], 'production' => ['APP_ENV' => 'production']]]);
+    config(['cloud.environments' => [
+        'production' => [
+            'branch' => 'main',
+            'timeout' => 45,
+            'octane' => true,
+            'network' => [
+                'firewall' => ['block_path' => true, 'browser_integrity_check' => true],
+            ],
+            'instances' => [
+                'App' => [
+                    'type' => 'app',
+                    'size' => 'flex-1gb',
+                    'scaling' => ['type' => 'auto', 'min_replicas' => 1, 'max_replicas' => 3],
+                    'hibernation_timeout' => null,
+                ],
+                'worker' => [
+                    'type' => 'service',
+                    'size' => 'flex-512mb',
+                    'scaling' => ['type' => 'custom', 'min_replicas' => 1, 'max_replicas' => 2],
+                ],
+            ],
+            'domains' => [
+                'example.com' => ['www_redirect' => 'www_to_root'],
+                'new.example.com' => ['wildcard' => true],
+            ],
+        ],
+    ]]);
+
+    Http::fake([
+        '*/applications' => Http::response([
+            'data' => [['id' => 'app-1', 'attributes' => ['repository' => ['full_name' => 'owner/repo']]]],
+        ]),
+        '*/applications/app-1/environments' => Http::response([
+            'data' => [['id' => 'env-1', 'attributes' => ['name' => 'production']]],
+        ]),
+        '*/environments/env-1/instances' => function (Request $request) {
+            return $request->method() === 'GET'
+                ? Http::response(['data' => [['id' => 'inst-app', 'attributes' => ['name' => 'App']]]])
+                : Http::response(['data' => ['id' => 'inst-worker']], 201);
+        },
+        '*/environments/env-1/domains' => function (Request $request) {
+            return $request->method() === 'GET'
+                ? Http::response(['data' => [['id' => 'dom-1', 'attributes' => ['name' => 'example.com']]]])
+                : Http::response(['data' => ['id' => 'dom-2']], 201);
+        },
+        '*' => Http::response(['data' => []]),
+    ]);
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
+        ->assertExitCode(0);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'PATCH'
+        && str_ends_with($request->url(), '/environments/env-1')
+        && $request['timeout'] === 45
+        && $request['uses_octane'] === true
+        && $request['firewall_block_path'] === true
+        && ! isset($request['uses_web_server'])
+        && ! isset($request['sleep_timeout']));
+
+    Http::assertSent(fn (Request $request) => str_ends_with($request->url(), '/environments/env-1/variables')
+        && $request['method'] === 'set'
+        && count($request['variables']) === 2);
+
+    // Existing app instance: no type, no replica counts with auto scaling.
+    Http::assertSent(fn (Request $request) => $request->method() === 'PATCH'
+        && str_ends_with($request->url(), '/instances/inst-app')
+        && $request['scaling_type'] === 'auto'
+        && ! isset($request['type'])
+        && ! isset($request['min_replicas'])
+        && array_key_exists('hibernation_timeout', $request->data())
+        && $request['hibernation_timeout'] === null);
+
+    // New worker instance: type plus the nullable fields the API requires.
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && str_ends_with($request->url(), '/environments/env-1/instances')
+        && $request['type'] === 'service'
+        && $request['scaling_type'] === 'custom'
+        && $request['max_replicas'] === 2
+        && array_key_exists('visibility_timeout', $request->data())
+        && array_key_exists('shutdown_timeout', $request->data()));
+
+    // Existing domain isn't patched; new domain is created.
+    Http::assertNotSent(fn (Request $request) => $request->method() === 'PATCH'
+        && str_contains($request->url(), '/domains/'));
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && str_ends_with($request->url(), '/environments/env-1/domains')
+        && $request['name'] === 'new.example.com'
+        && $request['wildcard_enabled'] === true
+        && ! array_key_exists('www_redirect', $request->data()));
+});
+
+test('deploy reports failure for a cancelled deployment', function () {
+    config(['cloud.token' => 'test-token']);
+    config(['cloud.application.repository' => 'owner/repo']);
+    config(['cloud.variables' => []]);
+    config(['cloud.environments' => ['production' => ['branch' => 'main']]]);
+
+    Http::fake([
+        '*/applications' => Http::response([
+            'data' => [['id' => 'app-1', 'attributes' => ['repository' => ['full_name' => 'owner/repo']]]],
+        ]),
+        '*/applications/app-1/environments' => Http::response([
+            'data' => [['id' => 'env-1', 'attributes' => ['name' => 'production']]],
+        ]),
+        '*/environments/env-1/deployments' => Http::response(['data' => ['id' => 'dep-1']], 201),
+        '*/deployments/dep-1' => Http::response([
+            'data' => ['id' => 'dep-1', 'attributes' => ['status' => 'cancelled', 'failure_reason' => 'Cancelled by user']],
+        ]),
+        '*' => Http::response(['data' => []]),
+    ]);
+
+    $this->artisan('cloud:deploy', ['--force' => true])
+        ->expectsOutputToContain('Deployment failed: Cancelled by user')
         ->assertExitCode(0);
 });

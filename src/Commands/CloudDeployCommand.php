@@ -8,6 +8,7 @@ use Illuminate\Console\Command;
 use Illuminate\Http\Client\RequestException;
 use NativePhp\LaravelCloudDeploy\CloudClient;
 use NativePhp\LaravelCloudDeploy\CloudState;
+use NativePhp\LaravelCloudDeploy\Enums\DeploymentStatus;
 
 class CloudDeployCommand extends Command
 {
@@ -81,7 +82,7 @@ class CloudDeployCommand extends Command
 
         if (empty($token)) {
             $this->error('LARAVEL_CLOUD_TOKEN is not set in your .env file.');
-            $this->line('Generate a token at: https://cloud.laravel.com/settings/api-tokens');
+            $this->line('Generate a token in your Laravel Cloud organization settings, under "API tokens".');
 
             return false;
         }
@@ -165,6 +166,7 @@ class CloudDeployCommand extends Command
         $this->line("  Creating application: {$name}");
 
         $response = $this->client->createApplication([
+            'source_control_provider_type' => config('cloud.application.source_control', 'github'),
             'repository' => $repository,
             'name' => $name,
             'region' => $region,
@@ -290,17 +292,12 @@ class CloudDeployCommand extends Command
             $updateData['deploy_command'] = implode(' && ', $config['deploy_commands']);
         }
 
-        if (isset($config['web_server'])) {
-            $updateData['uses_web_server'] = $config['web_server'];
-        }
-
         if (isset($config['octane'])) {
             $updateData['uses_octane'] = $config['octane'];
         }
 
-        if (isset($config['hibernation']) && $config['hibernation']) {
-            // Only set sleep_timeout if hibernation is enabled
-            $updateData['sleep_timeout'] = $config['timeout'] ?? 30;
+        if (isset($config['timeout'])) {
+            $updateData['timeout'] = $config['timeout'];
         }
 
         if (isset($config['vanity_domain'])) {
@@ -329,6 +326,10 @@ class CloudDeployCommand extends Command
                     $updateData['response_headers_content_type'] = $headers['content_type'];
                 }
 
+                if (isset($headers['robots_tag'])) {
+                    $updateData['response_headers_robots_tag'] = $headers['robots_tag'];
+                }
+
                 if (isset($headers['hsts']) && ($headers['hsts']['enabled'] ?? false)) {
                     $updateData['response_headers_hsts'] = [
                         'max_age' => $headers['hsts']['max_age'] ?? 31536000,
@@ -341,12 +342,12 @@ class CloudDeployCommand extends Command
             if (isset($network['firewall'])) {
                 $firewall = $network['firewall'];
 
-                if (isset($firewall['rate_limit_level'])) {
-                    $updateData['firewall_rate_limit_level'] = $firewall['rate_limit_level'];
+                if (isset($firewall['block_path'])) {
+                    $updateData['firewall_block_path'] = $firewall['block_path'];
                 }
 
-                if (isset($firewall['under_attack_mode'])) {
-                    $updateData['firewall_under_attack_mode'] = $firewall['under_attack_mode'];
+                if (isset($firewall['browser_integrity_check'])) {
+                    $updateData['firewall_browser_integrity_check'] = $firewall['browser_integrity_check'];
                 }
             }
         }
@@ -394,7 +395,9 @@ class CloudDeployCommand extends Command
             return;
         }
 
-        $this->client->addEnvironmentVariables($environmentId, $variables);
+        // "set" updates keys that already exist, so re-running a deploy
+        // doesn't pile up duplicate variables the way "append" would.
+        $this->client->setEnvironmentVariables($environmentId, $variables);
         $this->line('    Synced '.count($variables).' variables.');
     }
 
@@ -431,7 +434,7 @@ class CloudDeployCommand extends Command
             }
         }
 
-        $instanceData = $this->buildInstanceData($config);
+        $instanceData = $this->buildInstanceData($config, creating: ! $instanceId);
 
         if ($instanceId) {
             $this->line("    Updating instance: {$name}");
@@ -468,11 +471,13 @@ class CloudDeployCommand extends Command
      * @param  array<string, mixed>  $config
      * @return array<string, mixed>
      */
-    protected function buildInstanceData(array $config): array
+    protected function buildInstanceData(array $config, bool $creating): array
     {
         $data = [];
 
-        if (isset($config['type'])) {
+        // The type can only be set when creating an instance (service or
+        // managed_queue); the update endpoint doesn't accept it.
+        if ($creating && isset($config['type'])) {
             $data['type'] = $config['type'];
         }
 
@@ -484,11 +489,15 @@ class CloudDeployCommand extends Command
             $data['uses_scheduler'] = $config['scheduler'];
         }
 
-        if (isset($config['scaling'])) {
-            $scaling = $config['scaling'];
+        if (isset($config['scaling']) || $creating) {
+            $scaling = $config['scaling'] ?? [];
             $data['scaling_type'] = $scaling['type'] ?? 'none';
-            $data['min_replicas'] = $scaling['min_replicas'] ?? 1;
-            $data['max_replicas'] = $scaling['max_replicas'] ?? 1;
+
+            // Replica counts are rejected when auto-scaling.
+            if ($data['scaling_type'] !== 'auto') {
+                $data['min_replicas'] = $scaling['min_replicas'] ?? 1;
+                $data['max_replicas'] = $scaling['max_replicas'] ?? 1;
+            }
 
             if (isset($scaling['cpu_threshold'])) {
                 $data['scaling_cpu_threshold_percentage'] = $scaling['cpu_threshold'];
@@ -497,6 +506,15 @@ class CloudDeployCommand extends Command
             if (isset($scaling['memory_threshold'])) {
                 $data['scaling_memory_threshold_percentage'] = $scaling['memory_threshold'];
             }
+        }
+
+        if ($creating) {
+            // Required on create, even though only managed queues use them.
+            $data['visibility_timeout'] = $config['visibility_timeout'] ?? null;
+            $data['shutdown_timeout'] = $config['shutdown_timeout'] ?? null;
+        } elseif (array_key_exists('hibernation_timeout', $config)) {
+            // Minutes before the instance hibernates; null turns it off.
+            $data['hibernation_timeout'] = $config['hibernation_timeout'];
         }
 
         return $data;
@@ -595,13 +613,15 @@ class CloudDeployCommand extends Command
                 }
             }
 
-            $domainData = [
-                'name' => $domainName,
-                'www_redirect' => $domainConfig['www_redirect'] ?? null,
-                'wildcard_enabled' => $domainConfig['wildcard'] ?? false,
-            ];
-
             if ($domainId) {
+                // The API only lets you change a domain's verification method.
+                // Redirect and wildcard settings are fixed once it exists.
+                if (! isset($domainConfig['verification_method'])) {
+                    $this->line("    Domain exists: {$domainName}");
+
+                    continue;
+                }
+
                 $this->line("    Updating domain: {$domainName}");
 
                 if ($this->isDryRun) {
@@ -610,8 +630,17 @@ class CloudDeployCommand extends Command
                     continue;
                 }
 
-                $this->client->updateDomain($domainId, $domainData);
+                $this->client->updateDomain($domainId, [
+                    'verification_method' => $domainConfig['verification_method'],
+                ]);
             } else {
+                $domainData = array_filter([
+                    'name' => $domainName,
+                    'www_redirect' => $domainConfig['www_redirect'] ?? null,
+                    'wildcard_enabled' => $domainConfig['wildcard'] ?? false,
+                    'verification_method' => $domainConfig['verification_method'] ?? null,
+                ], fn ($value) => $value !== null);
+
                 $this->line("    Creating domain: {$domainName}");
 
                 if ($this->isDryRun) {
@@ -658,7 +687,7 @@ class CloudDeployCommand extends Command
 
         $finalStatus = $deployment['data']['attributes']['status'] ?? 'unknown';
 
-        if (in_array($finalStatus, ['deployed', 'deployment.succeeded'])) {
+        if (DeploymentStatus::tryFrom($finalStatus)?->isSuccessful()) {
             $this->info('    Deployment successful!');
         } else {
             $failureReason = $deployment['data']['attributes']['failure_reason'] ?? 'Unknown error';
