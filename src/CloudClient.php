@@ -318,6 +318,16 @@ class CloudClient
     }
 
     /**
+     * List the failed jobs on a managed queue instance.
+     *
+     * @return array<string, mixed>
+     */
+    public function listFailedJobs(string $instanceId): array
+    {
+        return $this->http->get("/instances/{$instanceId}/failed-jobs")->json();
+    }
+
+    /**
      * List background processes for an instance.
      *
      * @return array<string, mixed>

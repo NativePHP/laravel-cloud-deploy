@@ -467,3 +467,42 @@ test('a zero downtime cutover leaves Forge live and warns about writes after the
 
     expect(migrationState($this->project)->get('migration.cutover.mode'))->toBe('live');
 });
+
+test('the deploy step reports managed queue health and monitors worker queues', function () {
+    $state = prepareMigration($this->project, ['setup', 'site', 'inspect', 'report', 'config', 'provision', 'env', 'database', 'files']);
+    $state->setEnvironmentId('production', 'env-1');
+    $state->save();
+
+    // One queue stayed a worker process on the app instance.
+    $config = require $this->project.'/config/cloud.php';
+    $config['environments']['production']['instances']['App']['processes'] = [
+        'worker-emails' => ['type' => 'worker', 'processes' => 1, 'queue' => ['connection' => 'redis', 'queues' => ['emails']]],
+    ];
+    file_put_contents($this->project.'/config/cloud.php', NativePhp\LaravelCloudDeploy\Migration\Support\ConfigRenderer::render($config));
+
+    FakeApis::fake(cloud: [
+        'POST /environments/env-1/deployments' => Http::response(['data' => ['id' => 'dep-1']], 201),
+        'GET /deployments/dep-1' => ['data' => ['id' => 'dep-1', 'attributes' => ['status' => 'deployment.succeeded']]],
+        'GET /environments/env-1' => ['data' => ['id' => 'env-1', 'attributes' => ['vanity_domain' => 'shop.laravel.cloud']]],
+        'GET /environments/env-1/instances' => ['data' => [
+            ['id' => 'inst-app', 'attributes' => ['name' => 'App', 'type' => 'app', 'queue_status' => null, 'paused' => null]],
+            ['id' => 'inst-q', 'attributes' => ['name' => 'default', 'type' => 'managed_queue', 'queue_status' => 'available', 'paused' => false]],
+        ]],
+        'GET /instances/inst-q/failed-jobs' => ['data' => [['id' => 'job-1', 'attributes' => ['name' => 'App\\Jobs\\SendInvoice']]], 'meta' => ['total' => 1]],
+        'POST /environments/env-1/commands' => Http::response(['data' => ['id' => 'cmd-1']], 201),
+        'GET /commands/cmd-1' => ['data' => ['id' => 'cmd-1', 'attributes' => ['status' => 'command.success', 'output' => 'redis:emails ... [3] OK']]],
+    ]);
+
+    $this->artisan('cloud:migrate-from-forge', ['--step' => 'deploy'])
+        ->expectsConfirmation('Deploy to Cloud now?', 'yes')
+        ->expectsOutputToContain('has failed jobs')
+        ->expectsOutputToContain('redis:emails ... [3] OK')
+        ->assertExitCode(0);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && str_ends_with($request->url(), '/environments/env-1/commands')
+        && $request['command'] === 'php artisan queue:monitor redis:emails');
+
+    // Nothing that changes a queue is ever sent.
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'failed-jobs') && $request->method() !== 'GET');
+});
