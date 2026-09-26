@@ -106,6 +106,9 @@ The `config/cloud.php` file allows you to define:
 - **Background processes**: Queue workers and custom processes
 - **Domains**: Custom domains with SSL and WWW redirects
 - **Environment variables**: Global and per-environment variables
+- **Databases, caches and buckets**: Created if missing and attached to the environments that list them
+
+`cloud:deploy` exits with a non-zero status when a deployment fails, so it can gate a CI job.
 
 See the published config file for detailed examples and documentation.
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace NativePhp\LaravelCloudDeploy;
 
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\File;
 
 class CloudState
@@ -169,6 +170,30 @@ class CloudState
     public function setLastDeploymentId(string $environment, string $id): void
     {
         $this->state['environments'][$environment]['last_deployment_id'] = $id;
+    }
+
+    /**
+     * Get a value from the state using "dot" notation.
+     */
+    public function get(string $key, mixed $default = null): mixed
+    {
+        return Arr::get($this->state, $key, $default);
+    }
+
+    /**
+     * Set a value in the state using "dot" notation.
+     */
+    public function set(string $key, mixed $value): void
+    {
+        Arr::set($this->state, $key, $value);
+    }
+
+    /**
+     * Remove a value from the state using "dot" notation.
+     */
+    public function forget(string $key): void
+    {
+        Arr::forget($this->state, $key);
     }
 
     /**

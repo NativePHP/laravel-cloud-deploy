@@ -360,11 +360,17 @@ return [
     |--------------------------------------------------------------------------
     |
     | Describe the database clusters for your application. Clusters are
-    | shared across environments. Each environment attaches one database
-    | (schema) in a cluster via its database_schema_id.
+    | shared across environments. cloud:deploy creates each cluster if it
+    | doesn't exist, creates a database (schema) in it for every listed
+    | environment and attaches it, which makes Cloud inject the DB_*
+    | variables.
     |
-    | Note: cloud:deploy does not create or attach databases yet. This
-    | section documents the shape the API expects.
+    | "environments" is either a list of environment names (each gets a
+    | database named after the environment) or a map of environment name
+    | to database name, e.g. ['production' => 'laravel'].
+    |
+    | "name" is optional and defaults to the key. Leave "version" out to
+    | use the newest version Cloud offers.
     |
     | Supported types:
     |   - "laravel_mysql"             (Laravel MySQL)
@@ -409,6 +415,61 @@ return [
         //         'uses_scheduled_snapshots' => true,
         //         'retention_days' => 7,
         //     ],
+        //     'environments' => ['production'],
+        // ],
+
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Caches
+    |--------------------------------------------------------------------------
+    |
+    | Caches are created if they don't exist and attached to the listed
+    | environments. Cloud then injects REDIS_HOST, REDIS_PASSWORD and
+    | CACHE_STORE. An environment can only have one cache.
+    |
+    | Types: "laravel_valkey", "upstash_redis", "aws_elasticache_redis",
+    | "aws_elasticache_valkey". GET /caches/types lists sizes per type.
+    |
+    */
+
+    'caches' => [
+
+        // 'cache' => [
+        //     'type' => 'laravel_valkey',
+        //     'size' => 'valkey-flex-250mb',
+        //     'region' => env('LARAVEL_CLOUD_REGION', 'us-east-2'),
+        //     'auto_upgrade_enabled' => true,
+        //     'is_public' => false,
+        //     'environments' => ['production'],
+        // ],
+
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Object Storage Buckets
+    |--------------------------------------------------------------------------
+    |
+    | Buckets are created with a read/write access key if they don't exist
+    | and attached to the listed environments as a filesystem disk. Your
+    | application needs league/flysystem-aws-s3-v3 to use them.
+    |
+    | visibility: "private" or "public" (set once, for the whole bucket)
+    | jurisdiction: "default", "eu" or "us"
+    | disk: the Storage disk name the bucket is available as
+    | default: whether it becomes the default disk (FILESYSTEM_DISK)
+    |
+    */
+
+    'buckets' => [
+
+        // 'files' => [
+        //     'visibility' => 'private',
+        //     'jurisdiction' => 'default',
+        //     'disk' => 's3',
+        //     'default' => true,
         //     'environments' => ['production'],
         // ],
 
