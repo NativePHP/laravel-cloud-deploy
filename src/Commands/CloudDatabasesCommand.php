@@ -106,8 +106,7 @@ class CloudDatabasesCommand extends Command
 
         $clusterId = $cluster['id'];
 
-        // Fetch with schemas included
-        $response = $this->client->getDatabaseClusterWithSchemas($clusterId);
+        $response = $this->client->getDatabaseCluster($clusterId);
         $attrs = $response['data']['attributes'] ?? [];
 
         $this->newLine();
@@ -132,28 +131,25 @@ class CloudDatabasesCommand extends Command
         }
 
         // Show connection details if available
-        $hostname = $attrs['hostname'] ?? null;
+        $connection = $attrs['connection'] ?? [];
+        $hostname = $connection['hostname'] ?? null;
         if ($hostname) {
             $this->newLine();
             $this->line('  <fg=cyan>Connection:</>');
             $this->line("    <fg=gray>Host:</> {$hostname}");
-            $this->line('    <fg=gray>Port:</> '.($attrs['port'] ?? 'N/A'));
+            $this->line('    <fg=gray>Port:</> '.($connection['port'] ?? 'N/A'));
         }
 
-        // Show schemas from included resources
-        $this->showSchemas($response['included'] ?? []);
+        $this->showSchemas($this->client->listDatabases($clusterId)['data'] ?? []);
 
         return self::SUCCESS;
     }
 
     /**
-     * @param  array<int, array<string, mixed>>  $included
+     * @param  array<int, array<string, mixed>>  $schemas
      */
-    protected function showSchemas(array $included): void
+    protected function showSchemas(array $schemas): void
     {
-        // Filter for schema resources from the JSON:API included array
-        $schemas = array_filter($included, fn ($item) => ($item['type'] ?? '') === 'databaseSchemas');
-
         if (empty($schemas)) {
             return;
         }
@@ -172,6 +168,11 @@ class CloudDatabasesCommand extends Command
     protected function formatType(string $type): string
     {
         return match ($type) {
+            'laravel_mysql' => 'Laravel MySQL',
+            'aws_rds_mysql' => 'AWS RDS MySQL',
+            'aws_rds_postgres' => 'AWS RDS Postgres',
+            'neon_serverless_postgres' => 'Neon Serverless Postgres',
+            // Retired types that baked the version into the name
             'laravel_mysql_8' => 'Laravel MySQL 8',
             'aws_rds_mysql_8' => 'AWS RDS MySQL 8',
             'neon_serverless_postgres_18' => 'Neon Postgres 18',
@@ -184,9 +185,9 @@ class CloudDatabasesCommand extends Command
     protected function formatStatus(string $status): string
     {
         return match ($status) {
-            'active', 'available' => "<fg=green>{$status}</>",
-            'creating', 'modifying', 'pending' => "<fg=yellow>{$status}</>",
-            'failed', 'error' => "<fg=red>{$status}</>",
+            'available' => "<fg=green>{$status}</>",
+            'creating', 'updating', 'restarting', 'upgrading', 'moving', 'restoring' => "<fg=yellow>{$status}</>",
+            'restore_failed', 'disabled', 'deleting', 'deleted', 'unknown' => "<fg=red>{$status}</>",
             default => $status,
         };
     }

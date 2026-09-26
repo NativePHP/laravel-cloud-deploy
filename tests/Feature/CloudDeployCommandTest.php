@@ -123,10 +123,10 @@ test('command finds existing application by repository', function () {
         '*/environments/env-456/domains' => Http::response(['data' => []], 200),
         '*/environments/env-456/variables' => Http::response(['data' => []], 200),
         '*/environments/env-456/deployments' => Http::response([
-            'data' => ['id' => 'deploy-789', 'attributes' => ['status' => 'deployed']],
+            'data' => ['id' => 'deploy-789', 'attributes' => ['status' => 'deployment.succeeded']],
         ], 200),
         '*/deployments/deploy-789' => Http::response([
-            'data' => ['id' => 'deploy-789', 'attributes' => ['status' => 'deployed']],
+            'data' => ['id' => 'deploy-789', 'attributes' => ['status' => 'deployment.succeeded']],
         ], 200),
     ]);
 
