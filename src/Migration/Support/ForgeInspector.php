@@ -103,6 +103,29 @@ class ForgeInspector
                 'path' => $rule['attributes']['path'] ?? null,
             ], $this->forge->listSecurityRules($serverId, $siteId))),
             'local_disk_usage' => LocalDiskScanner::scan($projectPath),
+            'project' => self::projectFacts($projectPath),
+        ];
+    }
+
+    /**
+     * What the local project's composer.lock says, for features that need
+     * a minimum Laravel version or an extra package.
+     *
+     * @return array{laravel_version: string|null, has_aws_sdk: bool|null}
+     */
+    public static function projectFacts(string $projectPath): array
+    {
+        $lock = rtrim($projectPath, '/').'/composer.lock';
+
+        if (! is_file($lock)) {
+            return ['laravel_version' => null, 'has_aws_sdk' => null];
+        }
+
+        $packages = collect(json_decode((string) file_get_contents($lock), true)['packages'] ?? []);
+
+        return [
+            'laravel_version' => ($version = $packages->firstWhere('name', 'laravel/framework')['version'] ?? null) ? ltrim($version, 'v') : null,
+            'has_aws_sdk' => $packages->contains('name', 'aws/aws-sdk-php'),
         ];
     }
 

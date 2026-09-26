@@ -153,6 +153,13 @@ test('environment variables injected by Cloud resources are dropped', function (
         ->and($result['nightwatch_token'])->toBe('nw');
 });
 
+test('QUEUE_CONNECTION is dropped when managed queues are attached', function () {
+    $result = EnvironmentVariableFilter::filter(['QUEUE_CONNECTION' => 'redis', 'APP_NAME' => 'Shop'], ['managed_queue' => true]);
+
+    expect(array_keys($result['keep']))->toBe(['APP_NAME'])
+        ->and($result['drop'])->toHaveKey('QUEUE_CONNECTION');
+});
+
 test('variables for resources that are not attached are kept', function () {
     $result = EnvironmentVariableFilter::filter([
         'DB_HOST' => 'db.example.com',

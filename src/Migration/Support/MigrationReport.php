@@ -100,11 +100,28 @@ class MigrationReport
             $add(self::MIGRATES, 'Cache', 'Redis is used for cache, queues, sessions or Horizon; a Laravel Valkey cache will be attached');
         }
 
+        $queues = QueuePlanner::plan($inspection);
+        $keptWorkers = array_column($queues['workers'], 'id');
+
+        foreach ($queues['managed'] as $name => $queue) {
+            $add(self::MIGRATES, 'Managed queue', "\"{$name}\" becomes a managed queue ({$queue['size']}, up to {$queue['max_replicas']} worker(s), scales to zero when idle)");
+        }
+
+        foreach ($queues['reasons'] as $reason) {
+            $add(self::MIGRATES, 'Queue worker', $reason);
+        }
+
+        foreach ($queues['notes'] as $note) {
+            $add(self::MANUAL, 'Queues', $note);
+        }
+
         foreach ($inspection['processes'] as $process) {
             $label = "{$process['processes']} x {$process['command']}";
 
             match ($process['kind']) {
-                ProcessClassifier::WORKER => $add(self::MIGRATES, 'Queue worker', $label),
+                ProcessClassifier::WORKER => in_array($process['id'], $keptWorkers, true)
+                    ? $add(self::MIGRATES, 'Queue worker', "Worker process: {$label}")
+                    : null,
                 ProcessClassifier::HORIZON => $add(self::MIGRATES, 'Horizon', 'runs as a background process on Cloud'),
                 ProcessClassifier::OCTANE => $add(self::MIGRATES, 'Octane', 'Cloud runs Octane itself; the Octane setting will be turned on'),
                 ProcessClassifier::REVERB => $add(self::MANUAL, 'Reverb', 'Cloud offers managed WebSocket servers for Reverb. Set one up in the dashboard and attach it.'),

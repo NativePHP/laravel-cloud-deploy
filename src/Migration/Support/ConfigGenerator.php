@@ -82,7 +82,7 @@ class ConfigGenerator
                             'hibernation_timeout' => null,
                             'processes' => self::processes($inspection, $env),
                         ],
-                    ],
+                    ] + self::managedQueues($inspection),
                     // Added by the cutover step, once you're ready to move DNS.
                     'domains' => [],
                 ],
@@ -242,10 +242,17 @@ class ConfigGenerator
         $processes = [];
         $defaultConnection = $env['QUEUE_CONNECTION'] ?? 'database';
         $hasHorizon = false;
+        $keptWorkers = array_column(QueuePlanner::plan($inspection)['workers'], 'id');
 
         foreach ($inspection['processes'] ?? [] as $process) {
             switch ($process['kind']) {
                 case ProcessClassifier::WORKER:
+                    // Most workers become managed queues; only the ones
+                    // managed queues can't serve stay on the app instance.
+                    if (! in_array($process['id'], $keptWorkers, true)) {
+                        break;
+                    }
+
                     $queue = $process['queue'];
                     $name = self::uniqueName($processes, 'worker-'.Str::slug(implode('-', $queue['queues'])));
                     $processes[$name] = [
@@ -286,6 +293,27 @@ class ConfigGenerator
         }
 
         return $processes;
+    }
+
+    /**
+     * Managed queue instances, keyed by queue name.
+     *
+     * @param  array<string, mixed>  $inspection
+     * @return array<string, array<string, mixed>>
+     */
+    protected static function managedQueues(array $inspection): array
+    {
+        $instances = [];
+
+        foreach (QueuePlanner::plan($inspection)['managed'] as $name => $queue) {
+            $instances[$name] = [
+                'type' => 'managed_queue',
+                'size' => $queue['size'],
+                'scaling' => ['type' => 'custom', 'min_replicas' => 0, 'max_replicas' => $queue['max_replicas']],
+            ];
+        }
+
+        return $instances;
     }
 
     /**

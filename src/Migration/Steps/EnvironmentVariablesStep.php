@@ -50,6 +50,7 @@ class EnvironmentVariablesStep extends Step
             'database' => self::attachesTo($config['databases'] ?? []),
             'cache' => self::attachesTo($config['caches'] ?? []),
             'bucket' => self::attachesTo($config['buckets'] ?? []),
+            'managed_queue' => collect($config['environments'][ConfigGenerator::ENVIRONMENT]['instances'] ?? [])->contains('type', 'managed_queue'),
             'app_url' => $vanity ? 'https://'.preg_replace('#^https?://#', '', $vanity) : null,
         ]);
 

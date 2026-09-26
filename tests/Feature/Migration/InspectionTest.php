@@ -7,6 +7,7 @@ use NativePhp\LaravelCloudDeploy\ForgeClient;
 use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
 use NativePhp\LaravelCloudDeploy\Migration\Support\ForgeInspector;
 use NativePhp\LaravelCloudDeploy\Migration\Support\MigrationReport;
+use NativePhp\LaravelCloudDeploy\Migration\Support\QueuePlanner;
 use NativePhp\LaravelCloudDeploy\Tests\Support\FakeApis;
 
 beforeEach(function () {
@@ -192,4 +193,95 @@ test('Forge regions map to the nearest Cloud region and PHP versions are clamped
         ->and(ConfigGenerator::phpVersion('php81'))->toBe('8.2:1')
         ->and(ConfigGenerator::phpVersion('php84'))->toBe('8.4:1')
         ->and(ConfigGenerator::phpVersion(null))->toBe('8.4:1');
+});
+
+/**
+ * Forge routes for a site whose default queue connection is redis, with the given workers.
+ *
+ * @param  array<int, array<string, mixed>>  $processes
+ * @return array<string, mixed>
+ */
+function redisQueueSite(array $processes): array
+{
+    return [
+        'GET /servers/101/background-processes' => FakeApis::page($processes),
+        'GET /servers/101/sites/202/environment' => ['data' => FakeApis::resource('environments', '202', ['content' => FakeApis::env([
+            'QUEUE_CONNECTION' => 'redis',
+        ])])],
+    ];
+}
+
+function writeComposerLock(string $project, string $laravel, bool $awsSdk = true): void
+{
+    $packages = [['name' => 'laravel/framework', 'version' => "v{$laravel}"]];
+
+    if ($awsSdk) {
+        $packages[] = ['name' => 'aws/aws-sdk-php', 'version' => '3.300.0'];
+    }
+
+    file_put_contents($project.'/composer.lock', json_encode(['packages' => $packages]));
+}
+
+test('queue workers on the default connection become managed queues', function () {
+    writeComposerLock($this->project, '12.70.1');
+
+    ['config' => $config, 'report' => $report] = inspectAndGenerate($this->project, redisQueueSite([
+        FakeApis::process('1', 'php8.3 /home/forge/example.com/artisan queue:work redis --queue=emails,default --tries=3', 3),
+        FakeApis::process('2', 'php8.3 /home/forge/example.com/artisan queue:work --queue=reports --timeout=300'),
+    ]));
+
+    $instances = $config['environments']['production']['instances'];
+
+    expect(array_keys($instances))->toBe(['App', 'default', 'emails', 'reports'])
+        ->and($instances['App']['processes'])->toBe([])
+        ->and($instances['default'])->toBe(['type' => 'managed_queue', 'size' => 'mq.flex.256mb', 'scaling' => ['type' => 'custom', 'min_replicas' => 0, 'max_replicas' => 3]])
+        // A 300 second timeout is past Flex's 90 second limit.
+        ->and($instances['reports']['size'])->toBe('mq.pro.256mb');
+
+    $manual = collect($report)->where('status', MigrationReport::MANUAL)->pluck('detail')->implode("\n");
+
+    expect($manual)->toContain('$tries and $backoff')
+        ->toContain('Starter plan allows one managed queue')
+        ->toContain('Growth plan')
+        ->not->toContain('aws/aws-sdk-php');
+});
+
+test('workers stay worker processes when managed queues cannot take their jobs', function (array $processes, ?string $laravel, string $reason) {
+    if ($laravel) {
+        writeComposerLock($this->project, $laravel);
+    }
+
+    ['config' => $config, 'report' => $report] = inspectAndGenerate($this->project, redisQueueSite($processes));
+
+    $instances = $config['environments']['production']['instances'];
+
+    expect(collect($instances)->where('type', 'managed_queue'))->toBeEmpty()
+        ->and(collect($instances['App']['processes'])->where('type', 'worker'))->not->toBeEmpty()
+        ->and(collect($report)->pluck('detail')->implode("\n"))->toContain($reason);
+})->with([
+    'horizon' => [[
+        FakeApis::process('1', 'php8.3 /home/forge/example.com/artisan horizon'),
+        FakeApis::process('2', 'php8.3 /home/forge/example.com/artisan queue:work redis'),
+    ], '12.70.0', 'uses Horizon'],
+    'old laravel' => [[FakeApis::process('1', 'php artisan queue:work redis')], '11.20.0', 'runs Laravel 11.20.0'],
+    'other connection' => [[FakeApis::process('1', 'php artisan queue:work sqs --queue=default')], '12.70.0', 'reads that connection explicitly'],
+    'short queue name' => [[FakeApis::process('1', 'php artisan queue:work --queue=ai')], '12.70.0', '3 to 39 letters'],
+]);
+
+test('a missing aws sdk is flagged for managed queues', function () {
+    writeComposerLock($this->project, '13.20.0', awsSdk: false);
+
+    ['report' => $report] = inspectAndGenerate($this->project, redisQueueSite([
+        FakeApis::process('1', 'php artisan queue:work redis'),
+    ]));
+
+    expect(collect($report)->pluck('detail')->implode("\n"))->toContain('composer require aws/aws-sdk-php');
+});
+
+test('laravel versions are checked against the managed queue minimums', function () {
+    expect(QueuePlanner::laravelSupportsManagedQueues('11.55.0'))->toBeTrue()
+        ->and(QueuePlanner::laravelSupportsManagedQueues('12.62.9'))->toBeFalse()
+        ->and(QueuePlanner::laravelSupportsManagedQueues('v13.19.0'))->toBeTrue()
+        ->and(QueuePlanner::laravelSupportsManagedQueues('10.48.0'))->toBeFalse()
+        ->and(QueuePlanner::laravelSupportsManagedQueues('14.0.0'))->toBeTrue();
 });

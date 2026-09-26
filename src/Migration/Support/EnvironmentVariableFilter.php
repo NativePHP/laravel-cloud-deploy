@@ -15,8 +15,8 @@ class EnvironmentVariableFilter
 {
     /**
      * @param  array<string, string>  $variables  The parsed Forge .env
-     * @param  array{database?: bool, cache?: bool, bucket?: bool, app_url?: string|null}  $resources
-     *                                                                                                 What the Cloud environment has attached, and the URL to use for APP_URL
+     * @param  array{database?: bool, cache?: bool, bucket?: bool, managed_queue?: bool, app_url?: string|null}  $resources
+     *                                                                                                                       What the Cloud environment has attached, and the URL to use for APP_URL
      * @return array{keep: array<string, string>, drop: array<string, string>, replaced: array<string, string>, nightwatch_token: string|null}
      *                                                                                                                                         Kept variables with values, and dropped or replaced variable names with the reason
      */
@@ -80,6 +80,10 @@ class EnvironmentVariableFilter
             ], true)) {
                 return 'Cloud injects bucket credentials';
             }
+        }
+
+        if (($resources['managed_queue'] ?? false) && $key === 'QUEUE_CONNECTION') {
+            return 'Cloud sets QUEUE_CONNECTION=cloud for managed queues';
         }
 
         if ($usesNightwatch && $key === 'NIGHTWATCH_TOKEN') {
