@@ -107,10 +107,26 @@ class DatabaseStep extends Step
                 throw new MigrationException('Cloud didn\'t return connection details for the database cluster yet. Try again in a minute.');
             }
 
+            $events = $engine === 'mysql' ? $this->eventCount($shell, $source) : 0;
+
             $result = Spinner::run(
-                fn () => $shell->run(DatabaseScripts::copy($engine, $source, $destination), timeout: 6 * 3600),
+                fn () => $shell->run(DatabaseScripts::copy($engine, $source, $destination, events: $events > 0), timeout: 6 * 3600),
                 "Copying {$source['database']} to Cloud..."
             );
+
+            // Creating events needs the EVENT privilege. If Cloud's user
+            // doesn't have it, copy everything else rather than nothing.
+            if (! $result->successful() && $events > 0) {
+                $this->warn("The copy with {$events} scheduled event(s) failed: ".self::tail($result->errorOutput(), 3));
+                $this->warn('Trying again without events. Recreate them on Cloud, or better, move them into the Laravel scheduler.');
+
+                $result = Spinner::run(
+                    fn () => $shell->run(DatabaseScripts::copy($engine, $source, $destination, events: false), timeout: 6 * 3600),
+                    "Copying {$source['database']} to Cloud without events..."
+                );
+            } elseif ($events > 0) {
+                $this->warn("{$events} MySQL scheduled event(s) were copied. Check the event scheduler is on in Cloud before relying on them; the Laravel scheduler is the safer home for this work.");
+            }
 
             if (! $result->successful()) {
                 throw new MigrationException('The database copy failed: '.self::tail($result->errorOutput() ?: $result->output()));
@@ -172,6 +188,18 @@ class DatabaseStep extends Step
         throw new MigrationException('There is no Cloud database attached to the production environment yet.', [
             'Check the databases section of config/cloud.php, then run: php artisan cloud:migrate-from-forge --step=provision',
         ]);
+    }
+
+    /**
+     * How many MySQL scheduled events the source database has.
+     *
+     * @param  array<string, mixed>  $source
+     */
+    protected function eventCount(RemoteShell $shell, array $source): int
+    {
+        $output = $shell->run(DatabaseScripts::eventCount($source), timeout: 120)->output();
+
+        return preg_match('/events:(\d+)/', $output, $matches) ? (int) $matches[1] : 0;
     }
 
     protected function checkTools(RemoteShell $shell, string $engine): void

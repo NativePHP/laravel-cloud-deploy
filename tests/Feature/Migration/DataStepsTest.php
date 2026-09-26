@@ -181,6 +181,27 @@ test('the database step still cleans up when the copy fails', function () {
         ->and(migrationState($this->project)->get('migration.steps.database'))->toBeNull();
 });
 
+test('a copy that fails on events is retried without them', function () {
+    $state = prepareMigration($this->project, ['setup', 'site', 'inspect', 'report', 'config', 'provision', 'env']);
+    $state->set('resources.databases.shop-db', ['id' => 'db-1', 'schemas' => ['shop' => 'schema-1']]);
+    $state->save();
+
+    FakeApis::fake(sshKeyRoutes(), mysqlClusterRoutes());
+    fakeForgeServer([
+        'missing:' => '',
+        'information_schema.EVENTS' => "events:2\n",
+        'EVENTS="--events"' => Process::result('', "ERROR 1044 (42000) at line 812: Access denied for user 'cloud_user'@'%' to database 'shop'", 1),
+        'EVENTS="--skip-events"' => '',
+        'count_tables' => "source\tusers\t3\ntarget\tusers\t3\n",
+    ]);
+
+    $this->artisan('cloud:migrate-from-forge', ['--step' => 'database'])
+        ->expectsConfirmation('Copy the database to Cloud now? The site keeps running on Forge while it copies.', 'yes')
+        ->expectsOutputToContain('Trying again without events')
+        ->expectsOutputToContain('All 1 tables have the same number of rows')
+        ->assertExitCode(0);
+});
+
 test('missing database tools on the server are reported with an install hint', function () {
     $state = prepareMigration($this->project, ['setup', 'site', 'inspect', 'report', 'config', 'provision', 'env']);
     $state->set('resources.databases.shop-db', ['id' => 'db-1', 'schemas' => ['shop' => 'schema-1']]);

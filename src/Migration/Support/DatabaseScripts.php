@@ -29,10 +29,13 @@ class DatabaseScripts
     /**
      * Stream a dump of the source straight into the target.
      *
+     * MySQL dumps include routines, triggers and, when $events is true,
+     * scheduled events, as Laravel's Forge to Cloud guide does.
+     *
      * @param  array{host: string, port: int|string, database: string, username: string, password: string}  $source
      * @param  array{host: string, port: int|string, database: string, username: string, password: string}  $target
      */
-    public static function copy(string $engine, array $source, array $target): string
+    public static function copy(string $engine, array $source, array $target, bool $events = true): string
     {
         $script = self::variables($source, $target);
 
@@ -49,13 +52,29 @@ BASH;
         // --set-gtid-purged only exists in MySQL's mysqldump, not MariaDB's.
         // DEFINER clauses are stripped because Cloud users can't create
         // routines and triggers owned by another user.
+        $script .= $events ? "EVENTS=\"--events\"\n" : "EVENTS=\"--skip-events\"\n";
+
         return $script.<<<'BASH'
 GTID=""
 if mysqldump --help 2>/dev/null | grep -q -- '--set-gtid-purged'; then GTID="--set-gtid-purged=OFF"; fi
-MYSQL_PWD="$SRC_PASSWORD" mysqldump --single-transaction --quick --routines --triggers --no-tablespaces $GTID \
+MYSQL_PWD="$SRC_PASSWORD" mysqldump --single-transaction --quick --routines --triggers --no-tablespaces $EVENTS $GTID \
     -h "$SRC_HOST" -P "$SRC_PORT" -u "$SRC_USER" "$SRC_DB" \
   | sed -E 's/DEFINER=`[^`]+`@`[^`]+`//g' \
   | MYSQL_PWD="$DST_PASSWORD" mysql -h "$DST_HOST" -P "$DST_PORT" -u "$DST_USER" "$DST_DB"
+
+BASH;
+    }
+
+    /**
+     * Print how many scheduled events the source MySQL database has.
+     *
+     * @param  array{host: string, port: int|string, database: string, username: string, password: string}  $source
+     */
+    public static function eventCount(array $source): string
+    {
+        return self::variables($source, $source).<<<'BASH'
+MYSQL_PWD="$SRC_PASSWORD" mysql -N -B -h "$SRC_HOST" -P "$SRC_PORT" -u "$SRC_USER" \
+    -e "SELECT COUNT(*) FROM information_schema.EVENTS WHERE EVENT_SCHEMA = DATABASE()" "$SRC_DB" | sed 's/^/events:/'
 
 BASH;
     }

@@ -222,8 +222,12 @@ test('database scripts keep passwords out of command arguments', function () {
         ->toContain("SRC_PASSWORD='it'\\''s secret'")
         ->toContain('MYSQL_PWD="$SRC_PASSWORD" mysqldump --single-transaction --quick --routines --triggers')
         ->toContain('MYSQL_PWD="$DST_PASSWORD" mysql -h "$DST_HOST"')
+        ->toContain('EVENTS="--events"')
+        ->toContain('--no-tablespaces $EVENTS $GTID')
         ->not->toContain('-p"')
         ->not->toContain('--password');
+
+    expect(DatabaseScripts::copy('mysql', $source, $target, events: false))->toContain('EVENTS="--skip-events"');
 
     expect(DatabaseScripts::copy('pgsql', $source, $target))
         ->toContain('PGPASSWORD="$SRC_PASSWORD" pg_dump --no-owner --no-privileges')
