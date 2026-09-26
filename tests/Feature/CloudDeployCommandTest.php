@@ -552,3 +552,34 @@ test('deploy exits non-zero when a deployment fails', function () {
         ->expectsOutputToContain('Deployment failed for: production')
         ->assertExitCode(1);
 });
+
+test('managed queue instances are created with a minimum of zero replicas', function () {
+    config(['cloud.token' => 'test-token']);
+    config(['cloud.application.repository' => 'owner/repo']);
+    config(['cloud.variables' => []]);
+    config(['cloud.environments' => ['production' => [
+        'branch' => 'main',
+        'instances' => [
+            'emails' => ['type' => 'managed_queue', 'size' => 'mq.flex.256mb', 'scaling' => ['type' => 'custom', 'max_replicas' => 3]],
+        ],
+    ]]]);
+
+    fakeCloudWithEnvironment([
+        '*/environments/env-1/instances' => function (Request $request) {
+            return $request->method() === 'GET'
+                ? Http::response(['data' => []])
+                : Http::response(['data' => ['id' => 'inst-q']], 201);
+        },
+    ]);
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
+        ->assertExitCode(0);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && str_ends_with($request->url(), '/environments/env-1/instances')
+        && $request['name'] === 'emails'
+        && $request['type'] === 'managed_queue'
+        && $request['size'] === 'mq.flex.256mb'
+        && $request['min_replicas'] === 0
+        && $request['max_replicas'] === 3);
+});

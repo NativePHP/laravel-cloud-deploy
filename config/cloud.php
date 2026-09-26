@@ -266,6 +266,18 @@ return [
                     ],
                 ],
 
+                // Example: Managed queue. Cloud runs the workers, scales them
+                // with the queue depth and down to zero when idle, and sets
+                // QUEUE_CONNECTION=cloud. The instance name is the queue name
+                // (3-40 characters). Needs Laravel 11.55, 12.63 or 13.19+ and
+                // aws/aws-sdk-php. Sizes: "mq.flex.256mb" up to "mq.flex.2gb"
+                // (jobs up to 90 seconds) or "mq.pro.256mb" up to "mq.pro.8gb".
+                // 'default' => [
+                //     'type' => 'managed_queue',
+                //     'size' => 'mq.flex.256mb',
+                //     'scaling' => ['type' => 'custom', 'min_replicas' => 0, 'max_replicas' => 3],
+                // ],
+
                 // Example: Dedicated worker instance (separate from web)
                 // 'worker' => [
                 //     'type' => 'service',

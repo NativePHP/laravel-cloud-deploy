@@ -519,9 +519,10 @@ class CloudDeployCommand extends Command
             $scaling = $config['scaling'] ?? [];
             $data['scaling_type'] = $scaling['type'] ?? 'none';
 
-            // Replica counts are rejected when auto-scaling.
+            // Replica counts are rejected when auto-scaling. Managed queues
+            // always scale to zero when idle, so their minimum is 0.
             if ($data['scaling_type'] !== 'auto') {
-                $data['min_replicas'] = $scaling['min_replicas'] ?? 1;
+                $data['min_replicas'] = $scaling['min_replicas'] ?? (($config['type'] ?? null) === 'managed_queue' ? 0 : 1);
                 $data['max_replicas'] = $scaling['max_replicas'] ?? 1;
             }
 
