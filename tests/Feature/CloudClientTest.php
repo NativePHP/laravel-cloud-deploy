@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Http\Client\Request;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
 use NativePhp\LaravelCloudDeploy\CloudClient;
 use NativePhp\LaravelCloudDeploy\Enums\DeploymentStatus;
@@ -218,4 +219,61 @@ test('createDatabaseCluster posts to the clusters endpoint', function () {
     Http::assertSent(fn (Request $request) => $request->method() === 'POST'
         && $request->url() === 'https://cloud.laravel.com/api/databases/clusters'
         && $request['type'] === 'laravel_mysql');
+});
+
+test('hasValidToken is true when the organization endpoint answers', function () {
+    Http::fake([
+        'cloud.laravel.com/api/meta/organization' => Http::response([
+            'data' => ['id' => 'org-1', 'type' => 'organizations', 'attributes' => ['name' => 'NativePHP', 'slug' => 'nativephp']],
+        ]),
+    ]);
+
+    $client = new CloudClient('test-token');
+
+    expect($client->hasValidToken())->toBeTrue()
+        ->and($client->getOrganization()['data']['attributes']['slug'])->toBe('nativephp');
+});
+
+test('hasValidToken is false on a 401', function () {
+    Http::fake([
+        'cloud.laravel.com/api/meta/organization' => Http::response(['message' => 'Unauthenticated.'], 401),
+    ]);
+
+    expect((new CloudClient('bad-token'))->hasValidToken())->toBeFalse();
+});
+
+test('hasValidToken rethrows errors that are not about the token', function () {
+    Http::fake([
+        'cloud.laravel.com/api/meta/organization' => Http::response(['message' => 'Server Error'], 500),
+    ]);
+
+    (new CloudClient('test-token'))->hasValidToken();
+})->throws(RequestException::class);
+
+test('resource read methods hit the documented endpoints', function () {
+    Http::fake([
+        'cloud.laravel.com/api/*' => Http::response(['data' => []]),
+    ]);
+
+    $client = new CloudClient('test-token');
+
+    $client->listRegions();
+    $client->listCaches();
+    $client->getCache('cache-1');
+    $client->listCacheTypes();
+    $client->listBuckets();
+    $client->getBucket('bucket-1');
+    $client->listBucketKeys('bucket-1');
+
+    $sent = Http::recorded()->map(fn ($pair) => $pair[0]->method().' '.$pair[0]->url())->all();
+
+    expect($sent)->toBe([
+        'GET https://cloud.laravel.com/api/meta/regions',
+        'GET https://cloud.laravel.com/api/caches',
+        'GET https://cloud.laravel.com/api/caches/cache-1',
+        'GET https://cloud.laravel.com/api/caches/types',
+        'GET https://cloud.laravel.com/api/buckets',
+        'GET https://cloud.laravel.com/api/buckets/bucket-1',
+        'GET https://cloud.laravel.com/api/buckets/bucket-1/keys',
+    ]);
 });

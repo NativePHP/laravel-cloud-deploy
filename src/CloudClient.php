@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace NativePhp\LaravelCloudDeploy;
 
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use NativePhp\LaravelCloudDeploy\Enums\CommandStatus;
@@ -658,5 +659,109 @@ class CloudClient
     public function getDatabase(string $clusterId, string $databaseId): array
     {
         return $this->http->get("/databases/clusters/{$clusterId}/databases/{$databaseId}")->json();
+    }
+
+    /**
+     * Get the organization the API token belongs to.
+     *
+     * @return array<string, mixed>
+     */
+    public function getOrganization(): array
+    {
+        return $this->http->get('/meta/organization')->json();
+    }
+
+    /**
+     * Check whether the API token is accepted by Cloud.
+     *
+     * Returns false for a 401 (missing, expired or revoked token). Any other
+     * failure is rethrown so network or server errors aren't mistaken for a
+     * bad token.
+     */
+    public function hasValidToken(): bool
+    {
+        try {
+            $this->getOrganization();
+
+            return true;
+        } catch (RequestException $e) {
+            if ($e->response->status() === 401) {
+                return false;
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * List the regions Cloud can deploy to.
+     *
+     * @return array<string, mixed>
+     */
+    public function listRegions(): array
+    {
+        return $this->http->get('/meta/regions')->json();
+    }
+
+    /**
+     * List caches.
+     *
+     * @param  array<string, mixed>  $query  Optional filters, e.g. ['filter[type]' => 'laravel_valkey']
+     * @return array<string, mixed>
+     */
+    public function listCaches(array $query = []): array
+    {
+        return $this->http->get('/caches', $query)->json();
+    }
+
+    /**
+     * Get a cache by ID.
+     *
+     * @return array<string, mixed>
+     */
+    public function getCache(string $cacheId): array
+    {
+        return $this->http->get("/caches/{$cacheId}")->json();
+    }
+
+    /**
+     * List the cache types that can be created, with their regions and sizes.
+     *
+     * @return array<string, mixed>
+     */
+    public function listCacheTypes(): array
+    {
+        return $this->http->get('/caches/types')->json();
+    }
+
+    /**
+     * List object storage buckets.
+     *
+     * @param  array<string, mixed>  $query  Optional filters, e.g. ['filter[visibility]' => 'public']
+     * @return array<string, mixed>
+     */
+    public function listBuckets(array $query = []): array
+    {
+        return $this->http->get('/buckets', $query)->json();
+    }
+
+    /**
+     * Get an object storage bucket by ID.
+     *
+     * @return array<string, mixed>
+     */
+    public function getBucket(string $bucketId): array
+    {
+        return $this->http->get("/buckets/{$bucketId}")->json();
+    }
+
+    /**
+     * List the access keys for an object storage bucket.
+     *
+     * @return array<string, mixed>
+     */
+    public function listBucketKeys(string $bucketId): array
+    {
+        return $this->http->get("/buckets/{$bucketId}/keys")->json();
     }
 }
