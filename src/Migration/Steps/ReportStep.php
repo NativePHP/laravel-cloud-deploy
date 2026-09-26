@@ -6,6 +6,7 @@ namespace NativePhp\LaravelCloudDeploy\Migration\Steps;
 
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
+use NativePhp\LaravelCloudDeploy\Migration\Support\Dns;
 use NativePhp\LaravelCloudDeploy\Migration\Support\MigrationReport;
 
 use function Laravel\Prompts\confirm;
@@ -63,6 +64,8 @@ class ReportStep extends Step
         if ($manual > 0) {
             $this->warn("{$manual} item(s) need you to look at them. They won't stop the migration, but plan to deal with them before cutover.");
         }
+
+        Dns::adviseTtl($context);
 
         if ($context->dryRun) {
             return true;

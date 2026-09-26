@@ -6,6 +6,7 @@ namespace NativePhp\LaravelCloudDeploy\Migration\Steps;
 
 use Illuminate\Support\Sleep;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
+use NativePhp\LaravelCloudDeploy\Migration\Support\Dns;
 
 use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\multiselect;
@@ -43,9 +44,9 @@ class CutoverStep extends Step
 
     public function explanation(): string
     {
-        return 'Move your domain to Cloud. The Forge site goes into maintenance mode so nothing changes while the database is copied '
-            .'one last time and new files are synced. Then your domains are added to Cloud and you update DNS. '
-            .'Forge is never deleted: it stays in maintenance mode, ready to roll back to.';
+        return 'Move your domain to Cloud. Your current DNS records are saved for rollback, then you choose between a short maintenance '
+            .'window and a zero-downtime switch. The database is copied one last time, new files are synced, your domains are added to Cloud '
+            .'and you update DNS. Forge is never deleted, so you can roll back to it.';
     }
 
     public function handle(MigrationContext $context): bool
@@ -53,24 +54,15 @@ class CutoverStep extends Step
         $inspection = $context->inspection();
 
         if (! $context->get('cutover.started')) {
-            $this->explain(
-                'Before you start:',
-                '1. Lower the TTL on your DNS records (e.g. to 60 seconds) and wait for the old TTL to expire. That makes the switch, and any rollback, quick.',
-                '2. Make sure the app works on its Cloud URL'.($context->get('deploy.url') ? ' ('.$context->get('deploy.url').')' : '').'.',
-                '3. Pick a quiet time. The site shows a maintenance page from now until DNS points at Cloud.',
-            );
-
-            if (! confirm('Ready to put the Forge site into maintenance mode and start the cutover?', default: false)) {
+            if (! $this->prepare($context, $inspection)) {
                 return false;
             }
-
-            $context->put('cutover.started', now()->toIso8601String());
         }
 
         $serverId = (string) $context->get('forge.server_id');
         $siteId = (string) $context->get('forge.site_id');
 
-        if (! $context->get('cutover.maintenance')) {
+        if ($this->usesMaintenanceMode($context) && ! $context->get('cutover.maintenance')) {
             $context->forge()->enableMaintenanceMode($serverId, $siteId);
             $context->put('cutover.maintenance', true);
             $this->success('The Forge site is in maintenance mode.');
@@ -95,6 +87,10 @@ class CutoverStep extends Step
         }
 
         if (! $context->get('cutover.verified')) {
+            if (! $this->usesMaintenanceMode($context)) {
+                $this->warn('Forge is still live. Anything written there from now on, until DNS reaches Cloud, won\'t be in the Cloud database.');
+            }
+
             if (! $this->waitForDomains($context)) {
                 return false;
             }
@@ -274,18 +270,117 @@ class CutoverStep extends Step
         }
     }
 
+    /**
+     * Save the current DNS, remind about TTL, and choose how to cut over.
+     *
+     * @param  array<string, mixed>  $inspection
+     */
+    protected function prepare(MigrationContext $context, array $inspection): bool
+    {
+        // Record DNS as it is now, before anything changes, for rollback.
+        $records = Dns::snapshot(array_column($inspection['domains'], 'name'));
+        $context->put('cutover.previous_dns', $records);
+
+        if ($records !== []) {
+            $this->explain('Your domain\'s DNS right now. It\'s saved in .laravel-cloud.json in case you need to roll back:');
+            $this->table(['Name', 'Type', 'Value', 'TTL'], array_map(fn (array $record) => [
+                $record['name'], $record['type'], $record['value'], (string) ($record['ttl'] ?? ''),
+            ], $records));
+        }
+
+        $advised = Dns::ttlAdvisedAgo($context);
+
+        if ($advised === null) {
+            Dns::adviseTtl($context);
+            $this->warn('If you haven\'t lowered your TTL yet, consider stopping here and coming back tomorrow.');
+        } elseif ($advised->diffInHours(now()) < 24) {
+            $this->warn('You were first reminded to lower your DNS TTL '.$advised->diffForHumans().'. If you lowered it since then, caches may still hold the old TTL, so the switch could take a while to reach everyone.');
+        } else {
+            $this->success('You were reminded to lower your DNS TTL '.$advised->diffForHumans().', so a lowered TTL should have taken effect.');
+        }
+
+        $this->explain(
+            'There are two ways to cut over:',
+            'Maintenance mode: the Forge site shows a maintenance page while the database is copied a last time and until DNS points at Cloud. '
+                .'Visitors see a short outage, but no writes are lost.',
+            'Zero downtime: Forge stays live while the last copy runs and DNS switches over. Nobody sees an outage, but anything written to Forge '
+                .'after the last copy (orders, sign-ups, uploads) won\'t reach Cloud, and Forge\'s scheduler and workers keep running until you stop them.',
+        );
+
+        $mode = select('How do you want to cut over?', [
+            'maintenance' => 'Maintenance mode (short outage, no lost writes)',
+            'live' => 'Zero downtime (Forge stays live, recent writes on Forge may be lost)',
+        ], default: 'maintenance');
+
+        $question = $mode === 'maintenance'
+            ? 'Ready to put the Forge site into maintenance mode and start the cutover?'
+            : 'Ready to start the cutover? Forge stays live, and writes to it after the last copy won\'t reach Cloud.';
+
+        if (! confirm($question, default: false)) {
+            return false;
+        }
+
+        $context->put('cutover.mode', $mode);
+        $context->put('cutover.started', now()->toIso8601String());
+
+        return true;
+    }
+
+    protected function usesMaintenanceMode(MigrationContext $context): bool
+    {
+        return $context->get('cutover.mode', 'maintenance') === 'maintenance';
+    }
+
     protected function finish(MigrationContext $context): void
     {
         $inspection = $context->inspection();
+        $config = $context->cloudConfig()['environments'][$context->environmentName()] ?? [];
 
         $this->success('The site is running on Laravel Cloud.');
 
-        $this->explain(
-            'Keep the Forge server running for a while. It is still in maintenance mode and nothing on it was deleted.',
-            'To roll back:',
-            '1. Point DNS back at the Forge server ('.$inspection['server']['ip_address'].').',
-            '2. Take the Forge site out of maintenance mode: in Forge, or run "php artisan up" in '.$inspection['site']['path'].' on the server.',
-            'Anything written to the Cloud database after cutover is not copied back to Forge.',
-        );
+        $rollback = ['To roll back:'];
+        $previous = $context->get('cutover.previous_dns', []);
+
+        if ($previous !== []) {
+            $rollback[] = '1. Put these DNS records back at your DNS provider:';
+
+            foreach ($previous as $record) {
+                $rollback[] = "   {$record['name']} {$record['type']} {$record['value']}";
+            }
+        } else {
+            $rollback[] = '1. Point DNS back at the Forge server ('.$inspection['server']['ip_address'].').';
+        }
+
+        if ($this->usesMaintenanceMode($context)) {
+            $rollback[] = '2. Take the Forge site out of maintenance mode: in Forge, or run "php artisan up" in '.$inspection['site']['path'].' on the server.';
+        } else {
+            $rollback[] = '2. The Forge site was never paused, so it will serve traffic again as soon as DNS points back at it.';
+        }
+
+        $rollback[] = 'Anything written to Cloud after the cutover isn\'t copied back to Forge.';
+
+        $this->explain(...$rollback);
+
+        $tips = [
+            'Now that you\'re on Cloud:',
+            '- Set autoscaling: pick minimum and maximum replicas for the App cluster that match your traffic.',
+            '- For staging or quiet environments, turn on scale to zero (hibernation) so you pay nothing while they\'re idle.',
+        ];
+
+        if (! ($config['octane'] ?? false)) {
+            $tips[] = '- Try Octane: it\'s a toggle in the environment settings (or set octane to true in config/cloud.php) and usually makes requests faster.';
+        }
+
+        $tips[] = '- Watch Cloud\'s metrics for CPU, memory and requests and compare them with what Forge showed.';
+
+        $this->explain(...$tips);
+
+        $this->explain(...[
+            'Things still switched on:',
+            '- Forge: the site is '.($this->usesMaintenanceMode($context) ? 'in maintenance mode' : 'still live').'. Its scheduled jobs and background processes are still running, so stop them in Forge to avoid jobs running twice. Keep the server until you\'re sure, then archive it.',
+            '- Put your DNS TTL back up once things have settled.',
+            '- The temporary SSH key is removed and the Cloud database\'s public endpoint was switched off after each copy.',
+            '- If you made API tokens just for this, revoke them in Forge and Cloud.',
+        ]);
     }
 }

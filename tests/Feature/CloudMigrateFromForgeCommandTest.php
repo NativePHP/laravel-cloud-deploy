@@ -137,6 +137,7 @@ test('a dry run inspects the site and prints the config without creating anythin
         ->expectsQuestion('Which server is the site on?', '101')
         ->expectsQuestion('Which site do you want to move to Laravel Cloud?', '202')
         ->expectsOutputToContain('Migrates')
+        ->expectsOutputToContain('24 hours before you cut over')
         ->expectsQuestion('Which Cloud region should the app run in?', 'eu-west-2')
         ->expectsQuestion('What should the application be called in Cloud?', 'Shop')
         ->expectsQuestion('What should the Cloud environment be called?', 'production')

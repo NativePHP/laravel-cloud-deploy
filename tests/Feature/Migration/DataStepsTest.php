@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Sleep;
 use NativePhp\LaravelCloudDeploy\Commands\CloudMigrateFromForgeCommand;
+use NativePhp\LaravelCloudDeploy\Migration\Support\Dns;
 use NativePhp\LaravelCloudDeploy\Tests\Support\FakeApis;
 
 beforeEach(function () {
@@ -374,9 +375,15 @@ test('cutover puts Forge in maintenance, recopies data, adds domains and resumes
         'count_tables' => "source\tusers\t3\ntarget\tusers\t3\n",
     ]);
 
+    Dns::$resolver = fn (string $host) => $host === 'example.com'
+        ? [['host' => 'example.com', 'type' => 'A', 'ip' => '203.0.113.10', 'ttl' => 300]]
+        : [['host' => 'www.example.com', 'type' => 'CNAME', 'target' => 'example.com', 'ttl' => 300]];
+
     $this->artisan('cloud:migrate-from-forge')
         ->expectsQuestion('You\'ve done 10 of 11 steps. Next up: Cut over.', 'resume')
-        ->expectsOutputToContain('Lower the TTL')
+        ->expectsOutputToContain('203.0.113.10')
+        ->expectsOutputToContain('lower the TTL')
+        ->expectsQuestion('How do you want to cut over?', 'maintenance')
         ->expectsConfirmation('Ready to put the Forge site into maintenance mode and start the cutover?', 'yes')
         ->expectsQuestion('Which domains should move to Cloud?', ['example.com'])
         ->expectsOutputToContain('_acme-challenge.example.com')
@@ -392,7 +399,12 @@ test('cutover puts Forge in maintenance, recopies data, adds domains and resumes
         && $request['www_redirect'] === 'www_to_root');
 
     $state = migrationState($this->project);
-    expect($state->get('migration.cutover'))->toMatchArray(['maintenance' => true, 'database' => true, 'files' => true, 'domains' => true])
+    expect($state->get('migration.cutover'))->toMatchArray(['mode' => 'maintenance', 'maintenance' => true, 'database' => true, 'files' => true, 'domains' => true])
+        ->and($state->get('migration.cutover.previous_dns'))->toBe([
+            ['name' => 'example.com', 'type' => 'A', 'value' => '203.0.113.10', 'ttl' => 300],
+            ['name' => 'www.example.com', 'type' => 'CNAME', 'value' => 'example.com', 'ttl' => 300],
+        ])
+        ->and($state->get('migration.dns.ttl_advised_at'))->not->toBeNull()
         ->and($state->get('migration.steps.cutover'))->toBeNull();
 
     // Next run: DNS has propagated. Nothing is copied again.
@@ -404,7 +416,10 @@ test('cutover puts Forge in maintenance, recopies data, adds domains and resumes
         ->expectsOutputToContain('Every domain is verified')
         ->expectsOutputToContain('APP_URL is now https://example.com.')
         ->expectsConfirmation('Redeploy so the new APP_URL takes effect?', 'no')
-        ->expectsOutputToContain('To roll back')
+        // Each output assertion needs its own block of output, so one per note.
+        ->expectsOutputToContain('example.com A 203.0.113.10')
+        ->expectsOutputToContain('Try Octane')
+        ->expectsOutputToContain('stop them in Forge')
         ->assertExitCode(0);
 
     $later = collect(Http::recorded())->slice($requestsBefore)->map(fn ($pair) => $pair[0]);
@@ -413,4 +428,42 @@ test('cutover puts Forge in maintenance, recopies data, adds domains and resumes
         ->and($later->contains(fn (Request $request) => str_ends_with($request->url(), '/environments/env-1/variables')
             && $request['variables'] === [['key' => 'APP_URL', 'value' => 'https://example.com']]))->toBeTrue()
         ->and(migrationState($this->project)->get('migration.steps.cutover'))->not->toBeNull();
+});
+
+test('a zero downtime cutover leaves Forge live and warns about writes after the last copy', function () {
+    $state = prepareMigration($this->project, ['setup', 'site', 'inspect', 'report', 'config', 'provision', 'env', 'database', 'files', 'deploy']);
+    $state->setEnvironmentId('production', 'env-1');
+    $state->set('resources.databases.shop-db', ['id' => 'db-1', 'schemas' => ['shop' => 'schema-1']]);
+    $state->set('migration.dns.ttl_advised_at', now()->subHours(3)->toIso8601String());
+    $state->save();
+
+    $domain = ['data' => ['id' => 'dom-1', 'type' => 'domains', 'attributes' => [
+        'name' => 'example.com', 'hostname_status' => 'verified', 'ssl_status' => 'verified', 'origin_status' => 'verified',
+        'dns_records' => ['ssl' => [], 'pre_verification' => '', 'origin' => '203.0.113.99', 'origin_cname' => '', 'dcv' => ''],
+    ]]];
+
+    FakeApis::fake(sshKeyRoutes(), array_merge(mysqlClusterRoutes(), [
+        'POST /environments/env-1/domains' => $domain,
+        'POST /domains/dom-1/verify' => $domain,
+    ]));
+
+    fakeForgeServer([
+        'missing:' => '',
+        'mysqldump --single-transaction' => '',
+        'count_tables' => "source\tusers\t3\ntarget\tusers\t3\n",
+    ]);
+
+    $this->artisan('cloud:migrate-from-forge', ['--step' => 'cutover'])
+        ->expectsOutputToContain('3 hours ago')
+        ->expectsQuestion('How do you want to cut over?', 'live')
+        ->expectsConfirmation('Ready to start the cutover? Forge stays live, and writes to it after the last copy won\'t reach Cloud.', 'yes')
+        ->expectsQuestion('Which domains should move to Cloud?', ['example.com'])
+        ->expectsOutputToContain('Forge is still live')
+        ->expectsConfirmation('Redeploy so the new APP_URL takes effect?', 'no')
+        ->expectsOutputToContain('was never paused')
+        ->assertExitCode(0);
+
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'laravel-maintenance'));
+
+    expect(migrationState($this->project)->get('migration.cutover.mode'))->toBe('live');
 });

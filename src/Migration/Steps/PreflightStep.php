@@ -10,6 +10,7 @@ use NativePhp\LaravelCloudDeploy\CloudClient;
 use NativePhp\LaravelCloudDeploy\ForgeClient;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
+use NativePhp\LaravelCloudDeploy\Migration\Support\Dns;
 use NativePhp\LaravelCloudDeploy\Migration\Support\EnvFile;
 use NativePhp\LaravelCloudDeploy\Migration\Support\SourceControl;
 
@@ -50,6 +51,11 @@ class PreflightStep extends Step
         $this->connectCloud($context);
         $this->checkSourceControl($context);
         $this->checkLocalTools($context);
+
+        // DNS changes need a day's notice, so say so on the very first run.
+        if ($context->get('dns.ttl_advised_at') === null) {
+            Dns::adviseTtl($context);
+        }
 
         return true;
     }
