@@ -6,6 +6,7 @@ namespace NativePhp\LaravelCloudDeploy\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Sleep;
 use NativePhp\LaravelCloudDeploy\CloudClient;
 use NativePhp\LaravelCloudDeploy\CloudState;
 use NativePhp\LaravelCloudDeploy\Enums\DeploymentStatus;
@@ -25,6 +26,23 @@ class CloudDeployCommand extends Command
     protected CloudState $state;
 
     protected bool $isDryRun = false;
+
+    /**
+     * Environments whose deployment did not succeed.
+     *
+     * @var array<int, string>
+     */
+    protected array $failedDeployments = [];
+
+    /**
+     * How long to wait for a new database cluster or cache to become available.
+     */
+    public static int $resourceTimeoutSeconds = 1200;
+
+    /**
+     * How often to poll a new database cluster or cache for its status.
+     */
+    public static int $resourcePollSeconds = 10;
 
     public function handle(): int
     {
@@ -52,6 +70,13 @@ class CloudDeployCommand extends Command
             }
 
             $this->newLine();
+
+            if ($this->failedDeployments !== []) {
+                $this->error('Deployment failed for: '.implode(', ', $this->failedDeployments));
+
+                return self::FAILURE;
+            }
+
             $this->info('Deployment complete!');
 
             return self::SUCCESS;
@@ -195,6 +220,7 @@ class CloudDeployCommand extends Command
         }
 
         $this->configureEnvironment($environmentId, $config);
+        $this->attachResources($name, $environmentId);
         $this->syncEnvironmentVariables($name, $environmentId);
         $this->configureInstances($name, $environmentId, $config['instances'] ?? []);
         $this->configureDomains($name, $environmentId, $config['domains'] ?? []);
@@ -493,9 +519,10 @@ class CloudDeployCommand extends Command
             $scaling = $config['scaling'] ?? [];
             $data['scaling_type'] = $scaling['type'] ?? 'none';
 
-            // Replica counts are rejected when auto-scaling.
+            // Replica counts are rejected when auto-scaling. Managed queues
+            // always scale to zero when idle, so their minimum is 0.
             if ($data['scaling_type'] !== 'auto') {
-                $data['min_replicas'] = $scaling['min_replicas'] ?? 1;
+                $data['min_replicas'] = $scaling['min_replicas'] ?? (($config['type'] ?? null) === 'managed_queue' ? 0 : 1);
                 $data['max_replicas'] = $scaling['max_replicas'] ?? 1;
             }
 
@@ -657,6 +684,329 @@ class CloudDeployCommand extends Command
         }
     }
 
+    /**
+     * Create the database, cache and bucket resources this environment uses
+     * and attach them to it.
+     *
+     * Resources are shared across environments and identified by their key
+     * in config/cloud.php. Their IDs are cached in the state file, so
+     * running a deploy again reuses them rather than creating duplicates.
+     */
+    protected function attachResources(string $envName, string $environmentId): void
+    {
+        $attachments = [];
+
+        foreach (config('cloud.databases', []) as $key => $config) {
+            $schema = $this->schemaNameFor($config, $envName);
+
+            if ($schema === null) {
+                continue;
+            }
+
+            $attachments['database_schema_id'] = $this->ensureDatabase((string) $key, $config, $schema);
+        }
+
+        foreach (config('cloud.caches', []) as $key => $config) {
+            if (in_array($envName, $config['environments'] ?? [], true)) {
+                $attachments['cache_id'] = $this->ensureCache((string) $key, $config);
+            }
+        }
+
+        $filesystemKeys = [];
+
+        foreach (config('cloud.buckets', []) as $key => $config) {
+            if (! in_array($envName, $config['environments'] ?? [], true)) {
+                continue;
+            }
+
+            $keyId = $this->ensureBucket((string) $key, $config);
+
+            $filesystemKeys[] = [
+                'id' => $keyId,
+                'disk' => $config['disk'] ?? (string) $key,
+                'is_default_disk' => (bool) ($config['default'] ?? false),
+            ];
+        }
+
+        if ($filesystemKeys !== []) {
+            $attachments['filesystem_keys'] = $filesystemKeys;
+        }
+
+        $attachments = array_filter($attachments, fn ($value) => $value !== null);
+
+        if ($attachments === []) {
+            return;
+        }
+
+        if ($this->isDryRun) {
+            $this->warn('    [DRY RUN] Would attach resources: '.implode(', ', array_keys($attachments)));
+
+            return;
+        }
+
+        $this->line('  Attaching resources...');
+        $this->client->updateEnvironment($environmentId, $attachments);
+        $this->line('    Attached: '.implode(', ', array_keys($attachments)));
+    }
+
+    /**
+     * The name of the database (schema) an environment should use in a cluster,
+     * or null when the environment doesn't use the cluster.
+     *
+     * "environments" is either a list of environment names, each getting a
+     * database named after the environment, or a map of environment name to
+     * database name.
+     *
+     * @param  array<string, mixed>  $config
+     */
+    protected function schemaNameFor(array $config, string $envName): ?string
+    {
+        $environments = $config['environments'] ?? [];
+
+        if (array_is_list($environments)) {
+            return in_array($envName, $environments, true) ? $envName : null;
+        }
+
+        return isset($environments[$envName]) ? (string) $environments[$envName] : null;
+    }
+
+    /**
+     * Make sure a database cluster and a database (schema) in it exist.
+     *
+     * @param  array<string, mixed>  $config
+     * @return string|null The database (schema) ID, or null in a dry run
+     */
+    protected function ensureDatabase(string $key, array $config, string $schema): ?string
+    {
+        $name = $config['name'] ?? $key;
+        $clusterId = $this->state->get("resources.databases.{$key}.id");
+
+        $this->line("  Checking database cluster: {$name}");
+
+        if (! $clusterId) {
+            $clusterId = $this->client->findDatabaseClusterByName($name)['id'] ?? null;
+        }
+
+        if (! $clusterId) {
+            if ($this->isDryRun) {
+                $this->warn("    [DRY RUN] Would create {$config['type']} database cluster: {$name}");
+
+                return null;
+            }
+
+            $type = $config['type'] ?? 'laravel_mysql';
+
+            $response = $this->client->createDatabaseCluster([
+                'type' => $type,
+                'version' => $config['version'] ?? $this->latestDatabaseVersion($type),
+                'name' => $name,
+                'region' => $config['region'] ?? config('cloud.application.region'),
+                'config' => $config['config'] ?? [],
+                // Neon clusters can't skip the default database.
+                'create_default_database' => $type === 'neon_serverless_postgres',
+            ]);
+
+            $clusterId = $response['data']['id'];
+            $this->info("    Created database cluster: {$clusterId}");
+        }
+
+        $this->state->set("resources.databases.{$key}.id", $clusterId);
+        $this->state->save();
+
+        $schemaId = $this->state->get("resources.databases.{$key}.schemas.{$schema}");
+
+        if ($schemaId) {
+            return $schemaId;
+        }
+
+        $this->waitForResource(
+            fn () => $this->client->getDatabaseCluster($clusterId)['data']['attributes']['status'] ?? 'unknown',
+            "database cluster {$name}"
+        );
+
+        $schemaId = $this->client->findDatabaseByName($clusterId, $schema)['id'] ?? null;
+
+        if (! $schemaId) {
+            if ($this->isDryRun) {
+                $this->warn("    [DRY RUN] Would create database: {$schema}");
+
+                return null;
+            }
+
+            $schemaId = $this->client->createDatabase($clusterId, $schema)['data']['id'];
+            $this->line("    Created database: {$schema}");
+        }
+
+        $this->state->set("resources.databases.{$key}.schemas.{$schema}", $schemaId);
+        $this->state->save();
+
+        return $schemaId;
+    }
+
+    /**
+     * Pick the newest version the API offers for a database type.
+     */
+    protected function latestDatabaseVersion(string $type): string
+    {
+        foreach ($this->client->listDatabaseTypes()['data'] ?? [] as $databaseType) {
+            if (($databaseType['type'] ?? null) !== $type) {
+                continue;
+            }
+
+            $versions = $databaseType['versions'] ?? [];
+            usort($versions, 'version_compare');
+
+            if ($versions !== []) {
+                return (string) end($versions);
+            }
+        }
+
+        throw new \RuntimeException("Cloud didn't list any versions for the {$type} database type. Set a version in config/cloud.php.");
+    }
+
+    /**
+     * Make sure a cache exists.
+     *
+     * @param  array<string, mixed>  $config
+     * @return string|null The cache ID, or null in a dry run
+     */
+    protected function ensureCache(string $key, array $config): ?string
+    {
+        $name = $config['name'] ?? $key;
+        $cacheId = $this->state->get("resources.caches.{$key}.id");
+
+        $this->line("  Checking cache: {$name}");
+
+        if (! $cacheId) {
+            $cacheId = $this->client->findCacheByName($name)['id'] ?? null;
+        }
+
+        if (! $cacheId) {
+            if ($this->isDryRun) {
+                $this->warn("    [DRY RUN] Would create cache: {$name}");
+
+                return null;
+            }
+
+            $response = $this->client->createCache([
+                'type' => $config['type'] ?? 'laravel_valkey',
+                'name' => $name,
+                'region' => $config['region'] ?? config('cloud.application.region'),
+                'size' => $config['size'] ?? 'valkey-flex-250mb',
+                'auto_upgrade_enabled' => (bool) ($config['auto_upgrade_enabled'] ?? true),
+                'is_public' => (bool) ($config['is_public'] ?? false),
+            ]);
+
+            $cacheId = $response['data']['id'];
+            $this->info("    Created cache: {$cacheId}");
+
+            $this->waitForResource(
+                fn () => $this->client->getCache($cacheId)['data']['attributes']['status'] ?? 'unknown',
+                "cache {$name}"
+            );
+        }
+
+        $this->state->set("resources.caches.{$key}.id", $cacheId);
+        $this->state->save();
+
+        return $cacheId;
+    }
+
+    /**
+     * Make sure a bucket and an access key for it exist.
+     *
+     * @param  array<string, mixed>  $config
+     * @return string|null The access key ID, or null in a dry run
+     */
+    protected function ensureBucket(string $key, array $config): ?string
+    {
+        $name = $config['name'] ?? $key;
+        $bucketId = $this->state->get("resources.buckets.{$key}.id");
+        $keyId = $this->state->get("resources.buckets.{$key}.key_id");
+
+        $this->line("  Checking bucket: {$name}");
+
+        if ($bucketId && $keyId) {
+            return $keyId;
+        }
+
+        if (! $bucketId) {
+            $bucketId = $this->client->findBucketByName($name)['id'] ?? null;
+        }
+
+        if ($this->isDryRun) {
+            if (! $bucketId) {
+                $this->warn("    [DRY RUN] Would create bucket: {$name}");
+            }
+
+            return null;
+        }
+
+        $keyName = "{$name}-key";
+
+        if (! $bucketId) {
+            $response = $this->client->createBucket([
+                'name' => $name,
+                'visibility' => $config['visibility'] ?? 'private',
+                'jurisdiction' => $config['jurisdiction'] ?? 'default',
+                'key_name' => $keyName,
+                'key_permission' => 'read_write',
+            ]);
+
+            $bucketId = $response['data']['id'];
+            $keyId = collect($response['included'] ?? [])->firstWhere('type', 'filesystemKeys')['id']
+                ?? $response['data']['relationships']['keys']['data'][0]['id']
+                ?? null;
+
+            $this->info("    Created bucket: {$bucketId}");
+        } else {
+            $keyId = collect($this->client->listBucketKeys($bucketId)['data'] ?? [])
+                ->first(fn ($key) => ($key['attributes']['permission'] ?? null) === 'read_write')['id'] ?? null;
+        }
+
+        if (! $keyId) {
+            $keyId = $this->client->createBucketKey($bucketId, [
+                'name' => $keyName,
+                'permission' => 'read_write',
+            ])['data']['id'];
+        }
+
+        $this->state->set("resources.buckets.{$key}.id", $bucketId);
+        $this->state->set("resources.buckets.{$key}.key_id", $keyId);
+        $this->state->save();
+
+        return $keyId;
+    }
+
+    /**
+     * Poll a newly created resource until Cloud reports it as available.
+     *
+     * @param  callable(): string  $status
+     */
+    protected function waitForResource(callable $status, string $label): void
+    {
+        if ($this->isDryRun) {
+            return;
+        }
+
+        $deadline = time() + static::$resourceTimeoutSeconds;
+        $current = $status();
+
+        while ($current !== 'available') {
+            if (in_array($current, ['stopped', 'disabled', 'deleting', 'deleted', 'restore_failed'], true)) {
+                throw new \RuntimeException("The {$label} is {$current}, so it can't be used.");
+            }
+
+            if (time() >= $deadline) {
+                throw new \RuntimeException("Timed out waiting for the {$label} to become available (last status: {$current}).");
+            }
+
+            $this->line("    Waiting for {$label} ({$current})...");
+            Sleep::for(static::$resourcePollSeconds)->seconds();
+            $current = $status();
+        }
+    }
+
     protected function initiateDeployment(string $envName, string $environmentId): void
     {
         $this->line('  Initiating deployment...');
@@ -692,6 +1042,7 @@ class CloudDeployCommand extends Command
         } else {
             $failureReason = $deployment['data']['attributes']['failure_reason'] ?? 'Unknown error';
             $this->error("    Deployment failed: {$failureReason}");
+            $this->failedDeployments[] = $envName;
         }
     }
 }

@@ -9,6 +9,7 @@ use NativePhp\LaravelCloudDeploy\Commands\CloudAppCommand;
 use NativePhp\LaravelCloudDeploy\Commands\CloudCommandCommand;
 use NativePhp\LaravelCloudDeploy\Commands\CloudDatabasesCommand;
 use NativePhp\LaravelCloudDeploy\Commands\CloudDeployCommand;
+use NativePhp\LaravelCloudDeploy\Commands\CloudMigrateFromForgeCommand;
 use NativePhp\LaravelCloudDeploy\Commands\CloudStatusCommand;
 
 class CloudDeployServiceProvider extends ServiceProvider
@@ -39,6 +40,7 @@ class CloudDeployServiceProvider extends ServiceProvider
                 CloudCommandCommand::class,
                 CloudDatabasesCommand::class,
                 CloudDeployCommand::class,
+                CloudMigrateFromForgeCommand::class,
                 CloudStatusCommand::class,
             ]);
         }

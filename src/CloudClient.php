@@ -318,6 +318,16 @@ class CloudClient
     }
 
     /**
+     * List the failed jobs on a managed queue instance.
+     *
+     * @return array<string, mixed>
+     */
+    public function listFailedJobs(string $instanceId): array
+    {
+        return $this->http->get("/instances/{$instanceId}/failed-jobs")->json();
+    }
+
+    /**
      * List background processes for an instance.
      *
      * @return array<string, mixed>
@@ -662,6 +672,20 @@ class CloudClient
     }
 
     /**
+     * Find a database (schema) in a database cluster by name.
+     */
+    public function findDatabaseByName(string $clusterId, string $name): ?array
+    {
+        foreach ($this->all("/databases/clusters/{$clusterId}/databases") as $database) {
+            if (($database['attributes']['name'] ?? null) === $name) {
+                return $database;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Get the organization the API token belongs to.
      *
      * @return array<string, mixed>
@@ -715,6 +739,33 @@ class CloudClient
     }
 
     /**
+     * Find a cache by name.
+     */
+    public function findCacheByName(string $name): ?array
+    {
+        foreach ($this->all('/caches') as $cache) {
+            if (($cache['attributes']['name'] ?? null) === $name) {
+                return $cache;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Create a cache.
+     *
+     * Attach it to an environment with updateEnvironment($id, ['cache_id' => ...]).
+     *
+     * @param  array{type: string, name: string, region: string, size: string, auto_upgrade_enabled: bool, is_public: bool}  $data
+     * @return array<string, mixed>
+     */
+    public function createCache(array $data): array
+    {
+        return $this->http->post('/caches', $data)->json();
+    }
+
+    /**
      * Get a cache by ID.
      *
      * @return array<string, mixed>
@@ -746,6 +797,34 @@ class CloudClient
     }
 
     /**
+     * Find an object storage bucket by name.
+     */
+    public function findBucketByName(string $name): ?array
+    {
+        foreach ($this->all('/buckets') as $bucket) {
+            if (($bucket['attributes']['name'] ?? null) === $name) {
+                return $bucket;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Create an object storage bucket along with its first access key.
+     *
+     * The key comes back in `included`. Attach the bucket to an environment
+     * with updateEnvironment($id, ['filesystem_keys' => [['id' => $keyId, ...]]]).
+     *
+     * @param  array{name: string, visibility: string, jurisdiction: string, key_name: string, key_permission: string}  $data
+     * @return array<string, mixed>
+     */
+    public function createBucket(array $data): array
+    {
+        return $this->http->post('/buckets', $data)->json();
+    }
+
+    /**
      * Get an object storage bucket by ID.
      *
      * @return array<string, mixed>
@@ -763,5 +842,26 @@ class CloudClient
     public function listBucketKeys(string $bucketId): array
     {
         return $this->http->get("/buckets/{$bucketId}/keys")->json();
+    }
+
+    /**
+     * Create an access key for an object storage bucket.
+     *
+     * @param  array{name: string, permission: string}  $data
+     * @return array<string, mixed>
+     */
+    public function createBucketKey(string $bucketId, array $data): array
+    {
+        return $this->http->post("/buckets/{$bucketId}/keys", $data)->json();
+    }
+
+    /**
+     * Get an object storage access key, including its credentials.
+     *
+     * @return array<string, mixed>
+     */
+    public function getBucketKey(string $keyId): array
+    {
+        return $this->http->get("/bucket-keys/{$keyId}")->json();
     }
 }
