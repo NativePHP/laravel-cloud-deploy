@@ -4,8 +4,7 @@ Deploy Laravel applications to [Laravel Cloud](https://cloud.laravel.com) from t
 
 ## Sponsor
 
-This project is sponsored by [Bifrost](https://bifrost.nativephp.com) - the fastest way to compile and distribute your
-NativePHP apps.
+This project is sponsored by [Bifrost](https://bifrost.nativephp.com) - the fastest way to ship native apps with AI.
 
 ## Installation
 
