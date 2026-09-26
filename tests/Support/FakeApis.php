@@ -24,23 +24,45 @@ class FakeApis
     public const SITE = '202';
 
     /**
+     * @var array<string, mixed>
+     */
+    protected static array $forge = [];
+
+    /**
+     * @var array<string, mixed>
+     */
+    protected static array $cloud = [];
+
+    protected static ?object $factory = null;
+
+    /**
      * @param  array<string, mixed>  $forge  Overrides for the default Forge routes
      * @param  array<string, mixed>  $cloud  Overrides for the default Cloud routes
      */
     public static function fake(array $forge = [], array $cloud = []): void
     {
-        $forgeRoutes = array_merge(self::forgeRoutes(), self::prefixForge($forge));
-        $cloudRoutes = array_merge(self::cloudRoutes(), $cloud);
+        // Calling fake() again replaces the routes rather than stacking a
+        // second fake behind the first, which would never be reached.
+        self::$forge = array_merge(self::forgeRoutes(), self::prefixForge($forge));
+        self::$cloud = array_merge(self::cloudRoutes(), $cloud);
 
-        Http::fake(function (Request $request) use ($forgeRoutes, $cloudRoutes) {
+        $factory = Http::getFacadeRoot();
+
+        if (self::$factory === $factory) {
+            return;
+        }
+
+        self::$factory = $factory;
+
+        Http::fake(function (Request $request) {
             $url = parse_url($request->url());
             $path = preg_replace('#^/api#', '', $url['path'] ?? '');
             $key = $request->method().' '.$path;
-
-            $routes = str_contains($url['host'] ?? '', 'forge') ? $forgeRoutes : $cloudRoutes;
+            $isForge = str_contains($url['host'] ?? '', 'forge');
+            $routes = $isForge ? self::$forge : self::$cloud;
 
             if (! array_key_exists($key, $routes)) {
-                return str_contains($url['host'] ?? '', 'forge')
+                return $isForge
                     ? Http::response(['message' => "No fake for {$key}"], 404)
                     : Http::response(['data' => []]);
             }

@@ -14,12 +14,17 @@
         "php": "^8.2",
         "illuminate/console": "^11.0|^12.0|^13.0",
         "illuminate/http": "^11.0|^12.0|^13.0",
-        "illuminate/support": "^11.0|^12.0|^13.0"
+        "illuminate/process": "^11.0|^12.0|^13.0",
+        "illuminate/support": "^11.0|^12.0|^13.0",
+        "laravel/prompts": "^0.1.20|^0.2|^0.3"
     },
     "require-dev": {
         "laravel/pint": "^1.18",
         "orchestra/testbench": "^9.0|^10.0|^11.0",
         "pestphp/pest": "^3.0"
+    },
+    "suggest": {
+        "league/flysystem-aws-s3-v3": "Needed by cloud:migrate-from-forge to upload files from this machine when the Forge server has neither rclone nor the AWS CLI"
     },
     "autoload": {
         "psr-4": {
