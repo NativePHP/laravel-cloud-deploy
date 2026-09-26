@@ -47,14 +47,14 @@ test('setup explains the Forge token, retries a bad one and picks the organizati
         ->expectsQuestion('Paste your Laravel Cloud API token', 'cloud-token')
         ->expectsConfirmation('The token belongs to the Cloud organization "Acme Cloud". Is that where the site should go?', 'yes')
         ->expectsConfirmation('Save LARAVEL_CLOUD_TOKEN to this project\'s .env so you don\'t have to paste it again?', 'no')
-        ->expectsConfirmation('Is GitHub connected to Laravel Cloud?', 'yes')
+        ->expectsConfirmation('Is your Git provider connected to Laravel Cloud?', 'yes')
         ->assertExitCode(0);
 
     $state = migrationState($this->project);
 
     expect($state->get('migration.forge.organization'))->toBe('acme')
         ->and($state->get('migration.cloud.organization_id'))->toBe('org-1')
-        ->and($state->get('migration.github.connected'))->toBe('confirmed')
+        ->and($state->get('migration.source_control.connected'))->toBe('confirmed')
         ->and($state->get('migration.steps.setup'))->not->toBeNull()
         ->and(file_get_contents($this->project.'/.laravel-cloud.json'))->not->toContain('forge-token');
 });
@@ -90,10 +90,10 @@ test('an organization that already has applications is treated as having GitHub 
     $this->artisan('cloud:migrate-from-forge', ['--step' => 'setup'])
         ->expectsConfirmation('The token belongs to the Cloud organization "Acme Cloud". Is that where the site should go?', 'yes')
         ->expectsOutputToContain('already has 1 application(s)')
-        ->doesntExpectOutputToContain('Is GitHub connected')
+        ->doesntExpectOutputToContain('Is your Git provider connected')
         ->assertExitCode(0);
 
-    expect(migrationState($this->project)->get('migration.github.connected'))->toBe('assumed');
+    expect(migrationState($this->project)->get('migration.source_control.connected'))->toBe('assumed');
 });
 
 test('a rejected Cloud token is asked for again', function () {
@@ -115,16 +115,16 @@ test('a rejected Cloud token is asked for again', function () {
         ->assertExitCode(0);
 });
 
-test('without a connected provider the user is walked through connecting GitHub', function () {
+test('without a connected provider the user is walked through connecting one', function () {
     config(['cloud.token' => 'cloud-token', 'cloud.forge' => ['token' => 'forge-token']]);
     FakeApis::fake();
 
     $this->artisan('cloud:migrate-from-forge', ['--step' => 'setup'])
         ->expectsConfirmation('The token belongs to the Cloud organization "Acme Cloud". Is that where the site should go?', 'yes')
         ->expectsOutputToContain('Source control')
-        ->expectsConfirmation('Is GitHub connected to Laravel Cloud?', 'no')
+        ->expectsConfirmation('Is your Git provider connected to Laravel Cloud?', 'no')
         ->expectsConfirmation('Keep waiting while you connect it?', 'no')
-        ->expectsOutputToContain('Connect GitHub to Laravel Cloud, then run this command again.')
+        ->expectsOutputToContain('Connect your Git provider to Laravel Cloud, then run this command again.')
         ->assertExitCode(1);
 });
 
@@ -238,7 +238,7 @@ test('the env step copies variables without the ones Cloud injects', function ()
     });
 });
 
-test('provisioning explains GitHub again when the application cannot be created', function () {
+test('provisioning explains the Git provider again when the application cannot be created', function () {
     prepareMigration($this->project, ['setup', 'site', 'inspect', 'report', 'config']);
 
     FakeApis::fake(cloud: [

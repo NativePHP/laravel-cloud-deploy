@@ -72,6 +72,7 @@ class ForgeInspector
                     'url' => $siteAttributes['repository']['url'] ?? null,
                     'branch' => $siteAttributes['repository']['branch'] ?? null,
                     'full_name' => self::repositoryFullName($siteAttributes['repository']['url'] ?? null),
+                    'source_control' => SourceControl::fromForge($siteAttributes['repository']['provider'] ?? null),
                 ],
             ],
             'env' => [
@@ -140,7 +141,7 @@ class ForgeInspector
 
         $url = trim($url);
 
-        if (preg_match('#^(?:git@[^:]+:|https?://[^/]+/|ssh://git@[^/]+/)?([\w.-]+/[\w.-]+?)(?:\.git)?/?$#', $url, $matches)) {
+        if (preg_match('#^(?:git@[^:]+:|https?://[^/]+/|ssh://git@[^/]+/)?([\w.-]+(?:/[\w.-]+)*?/[\w.-]+?)(?:\.git)?/?$#', $url, $matches)) {
             return $matches[1];
         }
 

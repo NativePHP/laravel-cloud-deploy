@@ -7,6 +7,7 @@ namespace NativePhp\LaravelCloudDeploy\Migration\Steps;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
 use NativePhp\LaravelCloudDeploy\Migration\Support\ConfigGenerator;
+use NativePhp\LaravelCloudDeploy\Migration\Support\SourceControl;
 
 use function Laravel\Prompts\confirm;
 
@@ -28,7 +29,7 @@ class ProvisionStep extends Step
 
     public function explanation(): string
     {
-        return 'Run cloud:deploy --skip-deploy with config/cloud.php. It creates the application from your GitHub repository, '
+        return 'Run cloud:deploy --skip-deploy with config/cloud.php. It creates the application from your repository, '
             .'the production environment, the app instance with its workers, and the database, cache and buckets, then attaches them. '
             .'Nothing is deployed yet and nothing on Forge changes. Running it again reuses what already exists.';
     }
@@ -52,7 +53,7 @@ class ProvisionStep extends Step
             $context->state->load();
 
             if ($exitCode === 0) {
-                $context->put('github.connected', 'proven');
+                $context->put('source_control.connected', 'proven');
                 $this->success('The Cloud application and its resources are ready.');
 
                 return true;
@@ -64,9 +65,12 @@ class ProvisionStep extends Step
                 ]);
             }
 
-            // Creating the application is what proves GitHub is connected.
-            $this->fail('Cloud couldn\'t create the application. The usual cause is GitHub not being connected, or the Laravel Cloud GitHub app not having access to the repository.');
-            $this->explain(...PreflightStep::CLOUD_SOURCE_CONTROL_HELP);
+            // Creating the application is what proves the provider is connected.
+            $provider = $context->inspection()['site']['repository']['source_control'] ?? null;
+            $label = SourceControl::label($provider);
+
+            $this->fail("Cloud couldn't create the application. The usual cause is {$label} not being connected to Cloud, or the connected account not having access to the repository.");
+            $this->explain(...SourceControl::connectHelp($provider));
 
             if (! confirm('Try creating the application again?')) {
                 return false;

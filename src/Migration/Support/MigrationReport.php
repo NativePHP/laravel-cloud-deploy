@@ -49,11 +49,17 @@ class MigrationReport
         $repository = $site['repository'];
 
         if (! $repository['url']) {
-            $add(self::BLOCKER, 'Repository', 'The site has no Git repository. Cloud deploys from GitHub, so push the code to a GitHub repository and connect it in Forge first.');
-        } elseif ($repository['provider'] !== 'github' || ! $repository['full_name']) {
-            $add(self::BLOCKER, 'Repository', 'The repository is on "'.$repository['provider'].'". This tool needs the repository on GitHub.');
+            $add(self::BLOCKER, 'Repository', 'The site has no Git repository. Cloud deploys from GitHub, GitLab or Bitbucket, so push the code there and connect it in Forge first.');
+        } elseif (($repository['source_control'] ?? null) === null) {
+            $add(self::BLOCKER, 'Repository', 'The repository is a custom Git remote ("'.$repository['provider'].'"). Cloud deploys from GitHub, GitLab or Bitbucket.');
+        } elseif (! $repository['full_name']) {
+            $add(self::BLOCKER, 'Repository', 'Couldn\'t work out the repository name from "'.$repository['url'].'".');
         } else {
-            $add(self::MIGRATES, 'Repository', $repository['full_name'].' on branch '.($repository['branch'] ?: 'main'));
+            $add(self::MIGRATES, 'Repository', $repository['full_name'].' on '.SourceControl::label($repository['source_control']).', branch '.($repository['branch'] ?: 'main'));
+
+            if ($repository['source_control'] === 'gitlab_self_hosted') {
+                $add(self::MANUAL, 'Repository', 'Self-hosted GitLab only works on Laravel Cloud Private Cloud.');
+            }
         }
 
         // PHP

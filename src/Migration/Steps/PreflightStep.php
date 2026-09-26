@@ -11,24 +11,19 @@ use NativePhp\LaravelCloudDeploy\ForgeClient;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\MigrationException;
 use NativePhp\LaravelCloudDeploy\Migration\Support\EnvFile;
+use NativePhp\LaravelCloudDeploy\Migration\Support\SourceControl;
 
 use function Laravel\Prompts\confirm;
 use function Laravel\Prompts\password;
 use function Laravel\Prompts\select;
 
 /**
- * Makes sure both API tokens work, GitHub is connected to Cloud and the
+ * Makes sure both API tokens work, a Git provider is connected to Cloud and the
  * local tools the data steps need are installed. Nothing else runs until
  * this passes.
  */
 class PreflightStep extends Step
 {
-    public const CLOUD_SOURCE_CONTROL_HELP = [
-        'In Laravel Cloud, open Account settings > Source control and connect GitHub.',
-        'GitHub will ask you to install the Laravel Cloud app. Give it access to the repository you deploy from:',
-        'https://github.com/apps/laravel-cloud-app/installations/select_target',
-    ];
-
     public function name(): string
     {
         return 'setup';
@@ -41,7 +36,7 @@ class PreflightStep extends Step
 
     public function explanation(): string
     {
-        return 'First, check that this tool can talk to Forge and Laravel Cloud, that GitHub is connected to Cloud, and that SSH is available locally for copying data.';
+        return 'First, check that this tool can talk to Forge and Laravel Cloud, that your Git provider is connected to Cloud, and that SSH is available locally for copying data.';
     }
 
     public function runsInDryRun(): bool
@@ -53,7 +48,7 @@ class PreflightStep extends Step
     {
         $this->connectForge($context);
         $this->connectCloud($context);
-        $this->checkGitHub($context);
+        $this->checkSourceControl($context);
         $this->checkLocalTools($context);
 
         return true;
@@ -180,9 +175,9 @@ class PreflightStep extends Step
      * The Cloud API can't tell us which source control providers are
      * connected, so look for evidence and otherwise ask.
      */
-    protected function checkGitHub(MigrationContext $context): void
+    protected function checkSourceControl(MigrationContext $context): void
     {
-        if ($context->get('github.connected')) {
+        if ($context->get('source_control.connected')) {
             return;
         }
 
@@ -191,28 +186,28 @@ class PreflightStep extends Step
         if ($applications !== []) {
             $this->success(sprintf(
                 'Your Cloud organization already has %d application(s), so a source control provider is connected. '
-                .'The API doesn\'t say which one. If it isn\'t GitHub, creating the app will fail and you\'ll be shown how to connect it.',
+                .'The API doesn\'t say which one. If it isn\'t the one your repository is on, creating the app will fail and you\'ll be shown how to connect it.',
                 count($applications)
             ));
 
-            $context->put('github.connected', 'assumed');
+            $context->put('source_control.connected', 'assumed');
 
             return;
         }
 
         $this->explain(...[
-            'Cloud deploys straight from GitHub, so GitHub has to be connected to your Cloud account before the app can be created.',
-            ...self::CLOUD_SOURCE_CONTROL_HELP,
+            'Cloud deploys straight from your Git provider, so it has to be connected to your Cloud account before the app can be created.',
+            ...SourceControl::connectHelp(null),
             'This can only be done in the dashboard; the Cloud API has no endpoint for it. It will be confirmed when the app is created.',
         ]);
 
-        while (! confirm('Is GitHub connected to Laravel Cloud?', default: false)) {
+        while (! confirm('Is your Git provider connected to Laravel Cloud?', default: false)) {
             if (! confirm('Keep waiting while you connect it?', default: true)) {
-                throw new MigrationException('Connect GitHub to Laravel Cloud, then run this command again.', self::CLOUD_SOURCE_CONTROL_HELP);
+                throw new MigrationException('Connect your Git provider to Laravel Cloud, then run this command again.', SourceControl::connectHelp(null));
             }
         }
 
-        $context->put('github.connected', 'confirmed');
+        $context->put('source_control.connected', 'confirmed');
     }
 
     protected function checkLocalTools(MigrationContext $context): void

@@ -6,6 +6,7 @@ namespace NativePhp\LaravelCloudDeploy\Migration\Steps;
 
 use NativePhp\LaravelCloudDeploy\Migration\MigrationContext;
 use NativePhp\LaravelCloudDeploy\Migration\Support\ForgeInspector;
+use NativePhp\LaravelCloudDeploy\Migration\Support\SourceControl;
 use NativePhp\LaravelCloudDeploy\Migration\Support\Spinner;
 
 /**
@@ -59,12 +60,12 @@ class InspectStep extends Step
             ['Domains', implode(', ', array_column($inspection['domains'], 'name')) ?: 'none'],
         ]);
 
-        // An existing Cloud app for the same repository proves GitHub is connected.
+        // An existing Cloud app for the same repository proves the provider is connected.
         $repository = $site['repository']['full_name'] ?? null;
 
         if ($repository && $context->cloud()->findApplicationByRepository($repository)) {
-            $this->success("Cloud already has an application for {$repository}, so GitHub is connected.");
-            $context->put('github.connected', 'proven');
+            $this->success("Cloud already has an application for {$repository}, so ".SourceControl::label($site['repository']['source_control'] ?? null).' is connected.');
+            $context->put('source_control.connected', 'proven');
         }
 
         return true;

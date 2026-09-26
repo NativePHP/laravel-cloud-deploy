@@ -146,11 +146,27 @@ test('artisan daemons become custom processes and other daemons need manual work
         ->toContain('/usr/bin/backup.sh');
 });
 
+test('GitLab and Bitbucket repositories map to Cloud source control providers', function (string $provider, string $url, string $cloud, string $name) {
+    ['config' => $config, 'report' => $report] = inspectAndGenerate($this->project, [
+        'GET /sites/202' => ['data' => FakeApis::site([
+            'repository' => ['provider' => $provider, 'url' => $url, 'branch' => 'main', 'status' => 'installed'],
+        ])],
+    ]);
+
+    expect($config['application']['source_control'])->toBe($cloud)
+        ->and($config['application']['repository'])->toBe($name)
+        ->and(MigrationReport::hasBlockers($report))->toBeFalse();
+})->with([
+    ['gitlab', 'git@gitlab.com:acme/web/shop.git', 'gitlab', 'acme/web/shop'],
+    ['bitbucket', 'git@bitbucket.org:acme/shop.git', 'bitbucket', 'acme/shop'],
+    ['gitlab-custom', 'ssh://git@git.acme.test:2222/acme/shop.git', 'gitlab_self_hosted', 'acme/shop'],
+]);
+
 test('unsupported sites are blocked with a reason', function () {
     ['report' => $report] = inspectAndGenerate($this->project, [
         'GET /sites/202' => ['data' => FakeApis::site([
             'app_type' => 'WordPress',
-            'repository' => ['provider' => 'bitbucket', 'url' => 'git@bitbucket.org:acme/shop.git', 'branch' => 'main', 'status' => 'installed'],
+            'repository' => ['provider' => 'custom', 'url' => 'git@git.acme.test:acme/shop.git', 'branch' => 'main', 'status' => 'installed'],
         ])],
         'GET /servers/101/sites/202/environment' => ['data' => FakeApis::resource('environments', '202', ['content' => FakeApis::env(['DB_CONNECTION' => 'sqlite'])])],
     ]);
@@ -159,7 +175,7 @@ test('unsupported sites are blocked with a reason', function () {
 
     expect(MigrationReport::hasBlockers($report))->toBeTrue()
         ->and($blockers)->toContain('WordPress')
-        ->toContain('bitbucket')
+        ->toContain('custom Git remote')
         ->toContain('SQLite');
 });
 

@@ -58,7 +58,7 @@ class ConfigGenerator
             'application' => [
                 'name' => $plan['app_name'],
                 'repository' => $inspection['site']['repository']['full_name'],
-                'source_control' => 'github',
+                'source_control' => $inspection['site']['repository']['source_control'] ?? 'github',
                 'region' => $plan['region'],
             ],
             'environments' => [

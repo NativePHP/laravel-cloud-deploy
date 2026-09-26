@@ -36,7 +36,7 @@ function prepareMigration(string $project, array $steps, array $plan = []): Clou
     $state->set('migration', [
         'forge' => ['organization' => 'acme', 'server_id' => '101', 'site_id' => '202'],
         'cloud' => ['organization_id' => 'org-1'],
-        'github' => ['connected' => 'confirmed'],
+        'source_control' => ['connected' => 'confirmed'],
         'inspection' => $inspection,
         'plan' => $plan,
         'steps' => array_fill_keys($steps, '2024-01-01T00:00:00+00:00'),
