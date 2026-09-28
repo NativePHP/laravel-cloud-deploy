@@ -368,12 +368,31 @@ return [
     | Database Clusters
     |--------------------------------------------------------------------------
     |
-    | Describe the database clusters for your application. Clusters are
-    | shared across environments. Each environment attaches one database
-    | (schema) in a cluster via its database_schema_id.
+    | The database clusters your environments use, keyed by cluster name.
+    | Clusters belong to your Cloud organization and can be shared by
+    | several environments. Each environment gets one database (schema)
+    | in a cluster.
     |
-    | Note: cloud:deploy does not create or attach databases yet. This
-    | section documents the shape the API expects.
+    | For every environment it deploys, cloud:deploy:
+    |
+    |   1. Finds the cluster by name. Only if there's no cluster with that
+    |      name does it create one with the type, version, region and
+    |      config below (and asks first, unless you pass --force).
+    |   2. Finds the environment's database in the cluster by name, or
+    |      creates it. The name is the environment name unless you give
+    |      one: 'environments' => ['production', 'staging' => 'stage_db'].
+    |   3. Attaches that database to the environment, unless it already is.
+    |
+    | Cluster and database names are 3-40 characters of a-z, 0-9, "_"
+    | and "-".
+    |
+    | It never detaches, drops or recreates anything. If an environment
+    | already has a different database attached, it leaves it alone and
+    | prints a warning. An existing cluster's settings aren't changed.
+    |
+    | The cluster and database IDs are kept in .laravel-cloud.json. When
+    | they aren't there, they're looked up by name. --dry-run prints what
+    | would be created or attached without changing anything.
     |
     | Supported types:
     |   - "laravel_mysql"             (Laravel MySQL)
@@ -391,7 +410,7 @@ return [
 
         // 'main' => [
         //     'type' => 'neon_serverless_postgres',
-        //     'version' => '...', // one of the versions from GET /databases/types
+        //     'version' => '18', // one of the versions from GET /databases/types
         //     'region' => env('LARAVEL_CLOUD_REGION', 'us-east-2'),
         //
         //     // Serverless configuration (Neon Postgres)
@@ -402,14 +421,15 @@ return [
         //         'retention_days' => 7,   // Backup retention (0-30)
         //     ],
         //
-        //     // Environments to attach a database in this cluster to
+        //     // Environments that get a database in this cluster. Neon
+        //     // clusters also keep the default database Cloud creates.
         //     'environments' => ['production'],
         // ],
 
         // Example: Laravel MySQL configuration
         // 'mysql' => [
         //     'type' => 'laravel_mysql',
-        //     'version' => '...', // one of the versions from GET /databases/types
+        //     'version' => '8.4', // one of the versions from GET /databases/types
         //     'region' => 'us-east-2',
         //     'config' => [
         //         'size' => 'mysql-flex-512mb',

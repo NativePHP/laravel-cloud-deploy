@@ -18,6 +18,18 @@ class CloudClient
      */
     public const MAX_VARIABLES_PER_REQUEST = 200;
 
+    /**
+     * Database cluster statuses that mean Cloud is still working on the cluster.
+     */
+    public const BUSY_DATABASE_CLUSTER_STATUSES = [
+        'creating',
+        'updating',
+        'restarting',
+        'upgrading',
+        'moving',
+        'restoring',
+    ];
+
     protected string $baseUrl = 'https://cloud.laravel.com/api';
 
     protected PendingRequest $http;
@@ -160,11 +172,36 @@ class CloudClient
     /**
      * Get an environment by ID.
      *
+     * @param  array<int, string>  $include  Relationships to include, e.g. ['database']
      * @return array<string, mixed>
      */
-    public function getEnvironment(string $environmentId): array
+    public function getEnvironment(string $environmentId, array $include = []): array
     {
-        return $this->http->get("/environments/{$environmentId}")->json();
+        $query = $include === [] ? [] : ['include' => implode(',', $include)];
+
+        return $this->http->get("/environments/{$environmentId}", $query)->json();
+    }
+
+    /**
+     * Get the ID of the database (schema) attached to an environment, if any.
+     */
+    public function getEnvironmentDatabaseSchemaId(string $environmentId): ?string
+    {
+        $environment = $this->getEnvironment($environmentId, ['database']);
+
+        return $environment['data']['relationships']['database']['data']['id'] ?? null;
+    }
+
+    /**
+     * Attach a database (schema) to an environment.
+     *
+     * This replaces whatever database the environment had attached before.
+     *
+     * @return array<string, mixed>
+     */
+    public function attachDatabaseToEnvironment(string $environmentId, string $schemaId): array
+    {
+        return $this->updateEnvironment($environmentId, ['database_schema_id' => $schemaId]);
     }
 
     /**
@@ -606,6 +643,43 @@ class CloudClient
     }
 
     /**
+     * Wait until Cloud has finished working on a database cluster.
+     *
+     * Returns the cluster once its status is no longer one of the busy
+     * statuses (creating, updating and so on). The caller decides what to
+     * do with any status other than "available".
+     *
+     * @return array<string, mixed>
+     */
+    public function waitForDatabaseCluster(
+        string $clusterId,
+        int $timeoutSeconds = 900,
+        int $pollIntervalSeconds = 10,
+        ?callable $onStatusChange = null
+    ): array {
+        $startTime = time();
+        $lastStatus = null;
+
+        while (time() - $startTime < $timeoutSeconds) {
+            $cluster = $this->getDatabaseCluster($clusterId);
+            $status = $cluster['data']['attributes']['status'] ?? 'unknown';
+
+            if ($status !== $lastStatus && $onStatusChange) {
+                $onStatusChange($status, $cluster);
+                $lastStatus = $status;
+            }
+
+            if (! in_array($status, self::BUSY_DATABASE_CLUSTER_STATUSES, true)) {
+                return $cluster;
+            }
+
+            sleep($pollIntervalSeconds);
+        }
+
+        throw new \RuntimeException("Database cluster {$clusterId} was still busy after {$timeoutSeconds} seconds");
+    }
+
+    /**
      * Get a database cluster by ID.
      *
      * @return array<string, mixed>
@@ -645,6 +719,20 @@ class CloudClient
     public function listDatabases(string $clusterId): array
     {
         return $this->http->get("/databases/clusters/{$clusterId}/databases")->json();
+    }
+
+    /**
+     * Find a database (schema) in a cluster by name.
+     */
+    public function findDatabaseByName(string $clusterId, string $name): ?array
+    {
+        foreach ($this->all("/databases/clusters/{$clusterId}/databases") as $schema) {
+            if (($schema['attributes']['name'] ?? null) === $name) {
+                return $schema;
+            }
+        }
+
+        return null;
     }
 
     /**

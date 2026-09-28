@@ -106,8 +106,37 @@ The `config/cloud.php` file allows you to define:
 - **Background processes**: Queue workers and custom processes
 - **Domains**: Custom domains with SSL and WWW redirects
 - **Environment variables**: Global and per-environment variables
+- **Databases**: Database clusters and which environments get a database in them
 
 See the published config file for detailed examples and documentation.
+
+### Databases
+
+`cloud:deploy` owns the `databases` section. For each environment it deploys, it finds the cluster by name and only
+creates it when no cluster has that name. It then makes sure the environment's database exists in the cluster (named
+after the environment unless you give it a name) and attaches it.
+
+```php
+'databases' => [
+    'main' => [
+        'type' => 'laravel_mysql',
+        'version' => '8.4',
+        'region' => 'us-east-2',
+        'config' => [
+            'size' => 'mysql-flex-512mb',
+            'storage' => 5,
+            'is_public' => false,
+            'uses_scheduled_snapshots' => true,
+            'retention_days' => 7,
+        ],
+        // production gets a database called "production", staging one called "stage_db"
+        'environments' => ['production', 'staging' => 'stage_db'],
+    ],
+],
+```
+
+It never detaches, drops or recreates a cluster or database. If an environment already has a different database
+attached, it's left alone and you get a warning. The settings of an existing cluster aren't changed.
 
 ## State Management
 
@@ -118,9 +147,9 @@ Add it to git and share it with your team or CI tool. The file is only written w
 that finds nothing new leaves it alone. Deployment IDs and timestamps aren't kept in it.
 
 If the file is lost, the next run rebuilds it by looking everything up: the application by repository, and
-environments, instances and domains by name. Background processes have no name in Cloud, so they're matched on their
-settings (type, then queue connection and queues for workers, or the command for custom processes). A lost state file
-doesn't lead to duplicate workers.
+environments, instances, domains, database clusters and databases by name. Background processes have no name in
+Cloud, so they're matched on their settings (type, then queue connection and queues for workers, or the command for
+custom processes). A lost state file doesn't lead to duplicate workers.
 
 ## Requirements
 

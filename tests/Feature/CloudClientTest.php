@@ -277,3 +277,80 @@ test('resource read methods hit the documented endpoints', function () {
         'GET https://cloud.laravel.com/api/buckets/bucket-1/keys',
     ]);
 });
+
+test('getEnvironmentDatabaseSchemaId reads the included database relationship', function () {
+    Http::fake([
+        'cloud.laravel.com/api/environments/env-1?include=database' => Http::response([
+            'data' => [
+                'id' => 'env-1',
+                'relationships' => ['database' => ['data' => ['type' => 'databaseSchemas', 'id' => 'schema-1']]],
+            ],
+        ]),
+        'cloud.laravel.com/api/environments/env-2?include=database' => Http::response([
+            'data' => ['id' => 'env-2', 'relationships' => ['database' => ['data' => null]]],
+        ]),
+    ]);
+
+    $client = new CloudClient('test-token');
+
+    expect($client->getEnvironmentDatabaseSchemaId('env-1'))->toBe('schema-1')
+        ->and($client->getEnvironmentDatabaseSchemaId('env-2'))->toBeNull();
+});
+
+test('attachDatabaseToEnvironment patches only database_schema_id', function () {
+    Http::fake(['cloud.laravel.com/api/environments/env-1' => Http::response(['data' => ['id' => 'env-1']])]);
+
+    (new CloudClient('test-token'))->attachDatabaseToEnvironment('env-1', 'schema-1');
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'PATCH'
+        && $request->data() === ['database_schema_id' => 'schema-1']);
+});
+
+test('waitForDatabaseCluster polls until the cluster is no longer busy', function () {
+    Http::fake([
+        'cloud.laravel.com/api/databases/clusters/db-1' => Http::sequence()
+            ->push(['data' => ['attributes' => ['status' => 'creating']]])
+            ->push(['data' => ['attributes' => ['status' => 'creating']]])
+            ->push(['data' => ['attributes' => ['status' => 'available']]]),
+    ]);
+
+    $statuses = [];
+
+    $cluster = (new CloudClient('test-token'))->waitForDatabaseCluster(
+        'db-1',
+        pollIntervalSeconds: 0,
+        onStatusChange: function (string $status) use (&$statuses) {
+            $statuses[] = $status;
+        },
+    );
+
+    expect($cluster['data']['attributes']['status'])->toBe('available')
+        ->and($statuses)->toBe(['creating', 'available']);
+
+    Http::assertSentCount(3);
+});
+
+test('allBackgroundProcesses and findDatabaseByName follow pagination links', function () {
+    Http::fake([
+        'cloud.laravel.com/api/instances/inst-1/background-processes?page=2' => Http::response([
+            'data' => [['id' => 'process-2']],
+        ]),
+        'cloud.laravel.com/api/instances/inst-1/background-processes' => Http::response([
+            'data' => [['id' => 'process-1']],
+            'links' => ['next' => 'https://cloud.laravel.com/api/instances/inst-1/background-processes?page=2'],
+        ]),
+        'cloud.laravel.com/api/databases/clusters/db-1/databases?page=2' => Http::response([
+            'data' => [['id' => 'schema-2', 'attributes' => ['name' => 'production']]],
+        ]),
+        'cloud.laravel.com/api/databases/clusters/db-1/databases' => Http::response([
+            'data' => [['id' => 'schema-1', 'attributes' => ['name' => 'staging']]],
+            'links' => ['next' => 'https://cloud.laravel.com/api/databases/clusters/db-1/databases?page=2'],
+        ]),
+    ]);
+
+    $client = new CloudClient('test-token');
+
+    expect(array_column($client->allBackgroundProcesses('inst-1'), 'id'))->toBe(['process-1', 'process-2'])
+        ->and($client->findDatabaseByName('db-1', 'production')['id'])->toBe('schema-2')
+        ->and($client->findDatabaseByName('db-1', 'missing'))->toBeNull();
+});

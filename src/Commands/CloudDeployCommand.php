@@ -31,6 +31,13 @@ class CloudDeployCommand extends Command
      */
     protected bool $stateWritten = false;
 
+    /**
+     * The database each environment should have attached, keyed by environment name.
+     *
+     * @var array<string, array{cluster: string, schema: string, config: array<string, mixed>}>
+     */
+    protected array $databaseAttachments = [];
+
     public function handle(): int
     {
         $this->isDryRun = (bool) $this->option('dry-run');
@@ -108,7 +115,52 @@ class CloudDeployCommand extends Command
             return false;
         }
 
+        try {
+            $this->databaseAttachments = $this->resolveDatabaseAttachments(config('cloud.databases', []));
+        } catch (\InvalidArgumentException $e) {
+            $this->error($e->getMessage());
+
+            return false;
+        }
+
         return true;
+    }
+
+    /**
+     * Work out which database each environment should have from the "databases" config.
+     *
+     * An entry in a cluster's "environments" list is either an environment
+     * name, in which case the database is named after the environment, or
+     * an environment => database name pair.
+     *
+     * @param  array<string, array<string, mixed>>  $clusters
+     * @return array<string, array{cluster: string, schema: string, config: array<string, mixed>}>
+     */
+    protected function resolveDatabaseAttachments(array $clusters): array
+    {
+        $attachments = [];
+
+        foreach ($clusters as $clusterName => $clusterConfig) {
+            foreach ($clusterConfig['environments'] ?? [] as $key => $value) {
+                [$environment, $schema] = is_int($key) ? [$value, $value] : [$key, $value];
+
+                if (! is_string($environment) || ! is_string($schema) || $schema === '') {
+                    throw new \InvalidArgumentException("The environments list for database cluster '{$clusterName}' should contain environment names or environment => database name pairs.");
+                }
+
+                if (isset($attachments[$environment])) {
+                    throw new \InvalidArgumentException("Environment '{$environment}' is listed under more than one database cluster. An environment can only have one database attached.");
+                }
+
+                $attachments[$environment] = [
+                    'cluster' => (string) $clusterName,
+                    'schema' => $schema,
+                    'config' => $clusterConfig,
+                ];
+            }
+        }
+
+        return $attachments;
     }
 
     /**
@@ -222,12 +274,14 @@ class CloudDeployCommand extends Command
         $environmentId = $this->ensureEnvironment($name, $config);
 
         if (! $environmentId && $this->isDryRun) {
+            $this->configureDatabase($name, null);
             $this->warn("  [DRY RUN] Skipping further configuration for {$name}");
 
             return;
         }
 
         $this->configureEnvironment($environmentId, $config);
+        $this->configureDatabase($name, $environmentId);
         $this->syncEnvironmentVariables($name, $environmentId);
         $this->configureInstances($name, $environmentId, $config['instances'] ?? []);
         $this->configureDomains($name, $environmentId, $config['domains'] ?? []);
@@ -399,6 +453,194 @@ class CloudDeployCommand extends Command
 
         $this->client->updateEnvironment($environmentId, $updateData);
         $this->line('    Environment configured.');
+    }
+
+    /**
+     * Make sure the environment's database exists and is attached.
+     *
+     * Finds the cluster by name (creating it only when it's missing), makes
+     * sure the environment's database exists in it and attaches it. Nothing
+     * is ever detached, dropped or recreated: if the environment already has
+     * a different database attached, it's left alone with a warning.
+     *
+     * $environmentId is null during a dry run for an environment that would
+     * be created.
+     */
+    protected function configureDatabase(string $envName, ?string $environmentId): void
+    {
+        $attachment = $this->databaseAttachments[$envName] ?? null;
+
+        if (! $attachment) {
+            return;
+        }
+
+        $this->line('  Configuring database...');
+
+        $clusterId = $this->ensureDatabaseCluster($attachment['cluster'], $attachment['config']);
+        $schemaId = $this->ensureDatabaseSchema($attachment['cluster'], $clusterId, $attachment['schema']);
+
+        $this->attachDatabase($environmentId, $attachment['cluster'], $attachment['schema'], $schemaId);
+    }
+
+    /**
+     * @param  array<string, mixed>  $config
+     */
+    protected function ensureDatabaseCluster(string $name, array $config): ?string
+    {
+        $clusterId = $this->state->getDatabaseClusterId($name);
+
+        if ($clusterId) {
+            $this->line("    Using cached database cluster ID: {$clusterId}");
+
+            return $clusterId;
+        }
+
+        $cluster = $this->client->findDatabaseClusterByName($name);
+
+        if ($cluster) {
+            $clusterId = $cluster['id'];
+            $this->line("    Found existing database cluster {$name}: {$clusterId}");
+            $this->state->setDatabaseClusterId($name, $clusterId);
+            $this->persistState();
+
+            return $clusterId;
+        }
+
+        $type = $config['type'] ?? null;
+
+        $clusterData = [
+            'name' => $name,
+            'type' => $type,
+            'version' => isset($config['version']) ? (string) $config['version'] : null,
+            'region' => $config['region'] ?? config('cloud.application.region'),
+            'config' => $config['config'] ?? [],
+        ];
+
+        // Each environment's database is created by name below, so don't let
+        // Cloud add an unused default one. Neon clusters can't skip it.
+        if (! str_starts_with((string) $type, 'neon_serverless_postgres')) {
+            $clusterData['create_default_database'] = false;
+        }
+
+        if ($this->isDryRun) {
+            $this->warn("    [DRY RUN] Would create database cluster {$name} with: ".json_encode($clusterData));
+
+            return null;
+        }
+
+        if (! $this->option('force') && ! $this->confirm("Database cluster '{$name}' not found. Create it?")) {
+            throw new \RuntimeException('Aborted.');
+        }
+
+        $this->line("    Creating database cluster: {$name}");
+
+        $response = $this->client->createDatabaseCluster($clusterData);
+
+        $clusterId = $response['data']['id'];
+        $this->state->setDatabaseClusterId($name, $clusterId);
+        $this->persistState();
+        $this->info("    Created database cluster: {$clusterId}");
+
+        return $clusterId;
+    }
+
+    protected function ensureDatabaseSchema(string $clusterName, ?string $clusterId, string $name): ?string
+    {
+        $schemaId = $this->state->getDatabaseSchemaId($clusterName, $name);
+
+        if ($schemaId) {
+            $this->line("    Using cached ID for database {$name}: {$schemaId}");
+
+            return $schemaId;
+        }
+
+        if (! $clusterId) {
+            // Dry run: the cluster would be created, so the database would be too.
+            $this->warn("    [DRY RUN] Would create database {$name} in {$clusterName}");
+
+            return null;
+        }
+
+        $schema = $this->client->findDatabaseByName($clusterId, $name);
+
+        if ($schema) {
+            $schemaId = $schema['id'];
+            $this->line("    Found existing database {$name}: {$schemaId}");
+            $this->state->setDatabaseSchemaId($clusterName, $name, $schemaId);
+            $this->persistState();
+
+            return $schemaId;
+        }
+
+        if ($this->isDryRun) {
+            $this->warn("    [DRY RUN] Would create database {$name} in {$clusterName}");
+
+            return null;
+        }
+
+        // A new cluster takes a few minutes to come up, and a database can't
+        // be created in it until it has.
+        $cluster = $this->client->waitForDatabaseCluster(
+            $clusterId,
+            onStatusChange: function (string $status) {
+                if (in_array($status, CloudClient::BUSY_DATABASE_CLUSTER_STATUSES, true)) {
+                    $this->line("      Waiting for the cluster: {$status}");
+                }
+            }
+        );
+
+        $status = $cluster['data']['attributes']['status'] ?? 'unknown';
+
+        if ($status !== 'available') {
+            throw new \RuntimeException("Database cluster {$clusterName} is {$status}, so the database {$name} can't be created in it.");
+        }
+
+        $this->line("    Creating database {$name} in {$clusterName}");
+
+        $response = $this->client->createDatabase($clusterId, $name);
+
+        $schemaId = $response['data']['id'];
+        $this->state->setDatabaseSchemaId($clusterName, $name, $schemaId);
+        $this->persistState();
+        $this->info("    Created database: {$schemaId}");
+
+        return $schemaId;
+    }
+
+    protected function attachDatabase(?string $environmentId, string $clusterName, string $schemaName, ?string $schemaId): void
+    {
+        $label = "{$clusterName}/{$schemaName}";
+
+        if (! $environmentId || ! $schemaId) {
+            // Dry run: the environment or the database doesn't exist yet.
+            $this->warn("    [DRY RUN] Would attach database {$label}");
+
+            return;
+        }
+
+        $attachedId = $this->client->getEnvironmentDatabaseSchemaId($environmentId);
+
+        if ($attachedId === $schemaId) {
+            $this->line("    Database {$label} is already attached.");
+
+            return;
+        }
+
+        if ($attachedId !== null) {
+            $this->warn("    Another database ({$attachedId}) is attached to this environment, so {$label} was not attached.");
+            $this->warn('    cloud:deploy never detaches a database. Detach it in the Cloud dashboard first if you want to switch.');
+
+            return;
+        }
+
+        if ($this->isDryRun) {
+            $this->warn("    [DRY RUN] Would attach database {$label} ({$schemaId})");
+
+            return;
+        }
+
+        $this->client->attachDatabaseToEnvironment($environmentId, $schemaId);
+        $this->line("    Attached database {$label}.");
     }
 
     protected function syncEnvironmentVariables(string $envName, string $environmentId): void

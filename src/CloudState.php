@@ -203,6 +203,38 @@ class CloudState
     }
 
     /**
+     * Get a database cluster ID by the name it has in config/cloud.php.
+     */
+    public function getDatabaseClusterId(string $name): ?string
+    {
+        return $this->state['databases'][$name]['id'] ?? null;
+    }
+
+    /**
+     * Set a database cluster ID.
+     */
+    public function setDatabaseClusterId(string $name, string $id): void
+    {
+        $this->state['databases'][$name]['id'] = $id;
+    }
+
+    /**
+     * Get the ID of a database (schema) in a cluster.
+     */
+    public function getDatabaseSchemaId(string $cluster, string $schema): ?string
+    {
+        return $this->state['databases'][$cluster]['schemas'][$schema]['id'] ?? null;
+    }
+
+    /**
+     * Set the ID of a database (schema) in a cluster.
+     */
+    public function setDatabaseSchemaId(string $cluster, string $schema, string $id): void
+    {
+        $this->state['databases'][$cluster]['schemas'][$schema]['id'] = $id;
+    }
+
+    /**
      * Get the entire state array.
      *
      * @return array<string, mixed>
