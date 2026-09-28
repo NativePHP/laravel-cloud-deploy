@@ -328,6 +328,16 @@ class CloudClient
     }
 
     /**
+     * Get every background process on an instance, across all pages.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function allBackgroundProcesses(string $instanceId): array
+    {
+        return $this->all("/instances/{$instanceId}/background-processes");
+    }
+
+    /**
      * Create a background process.
      *
      * @param  array<string, mixed>  $data

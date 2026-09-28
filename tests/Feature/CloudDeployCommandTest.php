@@ -561,3 +561,168 @@ test('old timestamps and deployment IDs only drop out of the state file on a rea
         'environments' => ['production' => ['id' => 'env-1', 'instances' => ['App' => ['id' => 'inst-1']]]],
     ]);
 });
+
+test('an existing worker is matched by its settings when the state file is gone', function () {
+    fakeCloudApi(workerRoutes([listedWorker('process-1')]));
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
+        ->expectsOutputToContain('Found existing process queue-worker: process-1')
+        ->expectsOutputToContain('Process up to date: queue-worker')
+        ->assertExitCode(0);
+
+    // Matched, and already right, so neither a duplicate POST nor a PATCH.
+    Http::assertNotSent(fn (Request $request) => isProcessWrite($request));
+
+    $state = json_decode(file_get_contents(base_path('.laravel-cloud-test.json')), true);
+
+    expect($state['environments']['production']['instances']['App'])->toBe([
+        'id' => 'inst-1',
+        'processes' => ['queue-worker' => ['id' => 'process-1']],
+    ]);
+});
+
+test('a worker with different settings is matched on its queue and updated in place', function () {
+    fakeCloudApi(workerRoutes([
+        listedWorker('process-other', ['config' => ['queue' => 'emails']]),
+        listedWorker('process-1', ['processes' => 3, 'config' => ['tries' => 1]]),
+    ]));
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
+        ->expectsOutputToContain('Updating process: queue-worker')
+        ->assertExitCode(0);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'PATCH'
+        && str_ends_with($request->url(), '/background-processes/process-1')
+        && $request['processes'] === 1
+        && $request['config']['tries'] === 3);
+
+    Http::assertNotSent(fn (Request $request) => $request->method() === 'POST'
+        && str_contains($request->url(), 'background-processes'));
+    Http::assertNotSent(fn (Request $request) => str_ends_with($request->url(), '/background-processes/process-other')
+        && isWrite($request));
+});
+
+test('a process ID in the state file that no longer exists falls back to matching', function () {
+    file_put_contents(base_path('.laravel-cloud-test.json'), json_encode([
+        'application_id' => 'app-1',
+        'environments' => ['production' => ['id' => 'env-1', 'instances' => ['App' => [
+            'id' => 'inst-1',
+            'processes' => ['queue-worker' => ['id' => 'process-deleted']],
+        ]]]],
+    ]));
+
+    fakeCloudApi(workerRoutes([listedWorker('process-1')]));
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])->assertExitCode(0);
+
+    Http::assertNotSent(fn (Request $request) => isProcessWrite($request));
+
+    $state = json_decode(file_get_contents(base_path('.laravel-cloud-test.json')), true);
+
+    expect($state['environments']['production']['instances']['App']['processes']['queue-worker']['id'])->toBe('process-1');
+});
+
+test('two configured workers never share one existing process', function () {
+    $routes = workerRoutes([listedWorker('process-1')]);
+
+    config(['cloud.environments.production.instances.App.processes.emails-worker' => [
+        'type' => 'worker',
+        'processes' => 1,
+        'queue' => ['connection' => 'database', 'queues' => ['emails']],
+    ]]);
+
+    fakeCloudApi($routes);
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
+        ->expectsOutputToContain('Process up to date: queue-worker')
+        ->expectsOutputToContain('Creating process: emails-worker')
+        ->assertExitCode(0);
+
+    expect(collect(Http::recorded())->filter(fn (array $pair) => isProcessWrite($pair[0])))->toHaveCount(1);
+    Http::assertSent(fn (Request $request) => $request->method() === 'POST'
+        && str_ends_with($request->url(), '/instances/inst-1/background-processes')
+        && $request['config']['queue'] === 'emails');
+});
+
+test('custom processes are matched on their command', function () {
+    $routes = workerRoutes([
+        ['id' => 'process-reverb', 'attributes' => ['type' => 'custom', 'processes' => 1, 'command' => 'php artisan reverb:start', 'config' => []]],
+    ]);
+
+    config(['cloud.environments.production.instances.App.processes' => [
+        'websockets' => ['type' => 'custom', 'processes' => 1, 'command' => 'php artisan reverb:start'],
+    ]]);
+
+    fakeCloudApi($routes);
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])
+        ->expectsOutputToContain('Process up to date: websockets')
+        ->assertExitCode(0);
+
+    Http::assertNotSent(fn (Request $request) => isProcessWrite($request));
+});
+
+test('dry run leaves an existing state file untouched and previews the workers', function () {
+    $path = base_path('.laravel-cloud-test.json');
+    file_put_contents($path, json_encode(['application_id' => 'app-1'], JSON_PRETTY_PRINT));
+    touch($path, $mtime = time() - 3600);
+    $before = file_get_contents($path);
+
+    $routes = workerRoutes([listedWorker('process-1', ['processes' => 2])]);
+
+    config(['cloud.environments.production.instances.App.processes.emails-worker' => [
+        'type' => 'worker',
+        'processes' => 1,
+        'queue' => ['connection' => 'database', 'queues' => ['emails']],
+    ]]);
+
+    fakeCloudApi($routes);
+
+    $this->artisan('cloud:deploy', ['--dry-run' => true])
+        ->expectsOutputToContain('[DRY RUN] Would update instance with:')
+        ->expectsOutputToContain('Found existing process queue-worker: process-1')
+        ->expectsOutputToContain('[DRY RUN] Would update process with: {"type":"worker","processes":1')
+        ->expectsOutputToContain('Creating process: emails-worker')
+        ->expectsOutputToContain('[DRY RUN] Would create process with: {"type":"worker","processes":1,"config":{"connection":"database","queue":"emails"')
+        ->expectsOutputToContain('[DRY RUN] .laravel-cloud-test.json would be updated with the IDs found above. It was not written.')
+        ->assertExitCode(0);
+
+    Http::assertNotSent(fn (Request $request) => isWrite($request));
+
+    clearstatcache();
+    expect(file_get_contents($path))->toBe($before)
+        ->and(filemtime($path))->toBe($mtime);
+});
+
+test('dry run previews the workers of an instance that would be created', function () {
+    $routes = workerRoutes([]);
+    $routes['GET /environments/env-1/instances'] = ['data' => []];
+
+    fakeCloudApi($routes);
+
+    $this->artisan('cloud:deploy', ['--dry-run' => true])
+        ->expectsOutputToContain('[DRY RUN] Would create instance with:')
+        ->expectsOutputToContain('[DRY RUN] Would create process with:')
+        ->assertExitCode(0);
+
+    Http::assertNotSent(fn (Request $request) => isWrite($request));
+    Http::assertNotSent(fn (Request $request) => str_contains($request->url(), 'background-processes'));
+
+    expect(file_exists(base_path('.laravel-cloud-test.json')))->toBeFalse();
+});
+
+test('replica counts are only sent with custom scaling', function () {
+    $routes = workerRoutes([listedWorker('process-1')]);
+
+    config(['cloud.environments.production.instances.App.scaling' => ['type' => 'none', 'min_replicas' => 1, 'max_replicas' => 1]]);
+
+    fakeCloudApi($routes);
+
+    $this->artisan('cloud:deploy', ['--skip-deploy' => true, '--force' => true])->assertExitCode(0);
+
+    Http::assertSent(fn (Request $request) => $request->method() === 'PATCH'
+        && str_ends_with($request->url(), '/instances/inst-1')
+        && $request['scaling_type'] === 'none'
+        && ! array_key_exists('min_replicas', $request->data())
+        && ! array_key_exists('max_replicas', $request->data()));
+});

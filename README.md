@@ -117,6 +117,11 @@ allows subsequent deployments to update existing resources rather than creating 
 Add it to git and share it with your team or CI tool. The file is only written when an ID in it changes, so a deploy
 that finds nothing new leaves it alone. Deployment IDs and timestamps aren't kept in it.
 
+If the file is lost, the next run rebuilds it by looking everything up: the application by repository, and
+environments, instances and domains by name. Background processes have no name in Cloud, so they're matched on their
+settings (type, then queue connection and queues for workers, or the command for custom processes). A lost state file
+doesn't lead to duplicate workers.
+
 ## Requirements
 
 - PHP 8.2+

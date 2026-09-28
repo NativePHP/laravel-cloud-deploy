@@ -475,25 +475,21 @@ class CloudDeployCommand extends Command
 
             if ($this->isDryRun) {
                 $this->warn('      [DRY RUN] Would update instance with: '.json_encode($instanceData));
-
-                return;
+            } else {
+                $this->client->updateInstance($instanceId, $instanceData);
             }
-
-            $this->client->updateInstance($instanceId, $instanceData);
         } else {
             $this->line("    Creating instance: {$name}");
 
             if ($this->isDryRun) {
                 $this->warn('      [DRY RUN] Would create instance with: '.json_encode($instanceData));
-
-                return;
+            } else {
+                $instanceData['name'] = $name;
+                $response = $this->client->createInstance($environmentId, $instanceData);
+                $instanceId = $response['data']['id'];
+                $this->state->setInstanceId($envName, $name, $instanceId);
+                $this->persistState();
             }
-
-            $instanceData['name'] = $name;
-            $response = $this->client->createInstance($environmentId, $instanceData);
-            $instanceId = $response['data']['id'];
-            $this->state->setInstanceId($envName, $name, $instanceId);
-            $this->persistState();
         }
 
         if (! empty($config['processes'])) {
@@ -527,8 +523,9 @@ class CloudDeployCommand extends Command
             $scaling = $config['scaling'] ?? [];
             $data['scaling_type'] = $scaling['type'] ?? 'none';
 
-            // Replica counts are rejected when auto-scaling.
-            if ($data['scaling_type'] !== 'auto') {
+            // Replica counts only apply to custom scaling, and the API
+            // rejects them with auto.
+            if ($data['scaling_type'] === 'custom') {
                 $data['min_replicas'] = $scaling['min_replicas'] ?? 1;
                 $data['max_replicas'] = $scaling['max_replicas'] ?? 1;
             }
@@ -555,40 +552,193 @@ class CloudDeployCommand extends Command
     }
 
     /**
+     * $instanceId is null during a dry run for an instance that would be created.
+     *
      * @param  array<string, array<string, mixed>>  $processes
      */
-    protected function configureBackgroundProcesses(string $envName, string $instanceName, string $instanceId, array $processes): void
+    protected function configureBackgroundProcesses(string $envName, string $instanceName, ?string $instanceId, array $processes): void
     {
+        $existing = $instanceId ? $this->client->allBackgroundProcesses($instanceId) : [];
+        $matches = $this->matchBackgroundProcesses($envName, $instanceName, $processes, $existing);
+
         foreach ($processes as $processName => $processConfig) {
-            $processId = $this->state->getProcessId($envName, $instanceName, $processName);
-
             $processData = $this->buildProcessData($processConfig);
+            $process = $matches[$processName] ?? null;
 
-            if ($processId) {
+            if ($process) {
+                $processId = $process['id'];
+
+                if ($this->state->getProcessId($envName, $instanceName, $processName) !== $processId) {
+                    $this->line("      Found existing process {$processName}: {$processId}");
+                    $this->state->setProcessId($envName, $instanceName, $processName, $processId);
+                    $this->persistState();
+                }
+
+                if ($this->processHasSettings($process, $processData)) {
+                    $this->line("      Process up to date: {$processName}");
+
+                    continue;
+                }
+
                 $this->line("      Updating process: {$processName}");
 
                 if ($this->isDryRun) {
-                    $this->warn('        [DRY RUN] Would update process');
+                    $this->warn('        [DRY RUN] Would update process with: '.json_encode($processData));
 
                     continue;
                 }
 
                 $this->client->updateBackgroundProcess($processId, $processData);
-            } else {
-                $this->line("      Creating process: {$processName}");
 
-                if ($this->isDryRun) {
-                    $this->warn('        [DRY RUN] Would create process');
+                continue;
+            }
 
+            $this->line("      Creating process: {$processName}");
+
+            if ($this->isDryRun) {
+                $this->warn('        [DRY RUN] Would create process with: '.json_encode($processData));
+
+                continue;
+            }
+
+            $response = $this->client->createBackgroundProcess($instanceId, $processData);
+            $processId = $response['data']['id'];
+            $this->state->setProcessId($envName, $instanceName, $processName, $processId);
+            $this->persistState();
+        }
+    }
+
+    /**
+     * Pair each configured process with one already running on the instance.
+     *
+     * Background processes have no name in Cloud. The ID in the state file
+     * wins if that process still exists. Otherwise a process is matched on
+     * its settings: first one with exactly the configured settings, then one
+     * of the same type with the same queue connection and queues (workers)
+     * or the same command (custom processes). Each existing process is used
+     * at most once, so two configured workers never share one.
+     *
+     * @param  array<string, array<string, mixed>>  $processes
+     * @param  array<int, array<string, mixed>>  $existing
+     * @return array<string, array<string, mixed>> Existing processes keyed by configured name
+     */
+    protected function matchBackgroundProcesses(string $envName, string $instanceName, array $processes, array $existing): array
+    {
+        $available = [];
+
+        foreach ($existing as $process) {
+            $available[$process['id']] = $process;
+        }
+
+        $matches = [];
+
+        foreach (array_keys($processes) as $processName) {
+            $processId = $this->state->getProcessId($envName, $instanceName, $processName);
+
+            if ($processId !== null && isset($available[$processId])) {
+                $matches[$processName] = $available[$processId];
+                unset($available[$processId]);
+            }
+        }
+
+        $matchers = [
+            fn (array $process, array $data) => $this->processHasSettings($process, $data),
+            fn (array $process, array $data) => $this->processIsSameKind($process, $data),
+        ];
+
+        foreach ($matchers as $matcher) {
+            foreach ($processes as $processName => $processConfig) {
+                if (isset($matches[$processName])) {
                     continue;
                 }
 
-                $response = $this->client->createBackgroundProcess($instanceId, $processData);
-                $processId = $response['data']['id'];
-                $this->state->setProcessId($envName, $instanceName, $processName, $processId);
-                $this->persistState();
+                $processData = $this->buildProcessData($processConfig);
+
+                foreach ($available as $processId => $process) {
+                    if ($matcher($process, $processData)) {
+                        $matches[$processName] = $process;
+                        unset($available[$processId]);
+
+                        break;
+                    }
+                }
             }
         }
+
+        return $matches;
+    }
+
+    /**
+     * Whether an existing process is the same type as the configured one and
+     * works the same queues (workers) or runs the same command (custom).
+     *
+     * @param  array<string, mixed>  $process
+     * @param  array<string, mixed>  $data
+     */
+    protected function processIsSameKind(array $process, array $data): bool
+    {
+        $attributes = $process['attributes'] ?? [];
+
+        if (($attributes['type'] ?? null) !== $data['type']) {
+            return false;
+        }
+
+        // Cloud builds a worker's command from its config, so only custom
+        // processes are compared on the command.
+        if ($data['type'] !== 'worker') {
+            return trim((string) ($attributes['command'] ?? '')) === trim((string) ($data['command'] ?? ''));
+        }
+
+        foreach (['connection', 'queue'] as $key) {
+            if (isset($data['config'][$key]) && ! $this->sameProcessSetting($key, $attributes['config'][$key] ?? null, $data['config'][$key])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether an existing process already has every configured setting.
+     *
+     * @param  array<string, mixed>  $process
+     * @param  array<string, mixed>  $data
+     */
+    protected function processHasSettings(array $process, array $data): bool
+    {
+        if (! $this->processIsSameKind($process, $data)) {
+            return false;
+        }
+
+        $attributes = $process['attributes'] ?? [];
+
+        if ((int) ($attributes['processes'] ?? 0) !== (int) $data['processes']) {
+            return false;
+        }
+
+        foreach ($data['config'] ?? [] as $key => $value) {
+            if (! $this->sameProcessSetting($key, $attributes['config'][$key] ?? null, $value)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    protected function sameProcessSetting(string $key, mixed $actual, mixed $expected): bool
+    {
+        if ($actual === null || $expected === null) {
+            return $actual === $expected;
+        }
+
+        if ($key === 'queue') {
+            $normalize = fn (mixed $queues) => implode(',', array_map('trim', explode(',', (string) $queues)));
+
+            return $normalize($actual) === $normalize($expected);
+        }
+
+        // The API returns JSON numbers and booleans; config values may be strings.
+        return $actual == $expected;
     }
 
     /**

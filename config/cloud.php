@@ -186,10 +186,11 @@ return [
             | The type can't be changed after the instance is created.
             |
             | Scaling types:
-            |   - "none"   : Fixed number of replicas
+            |   - "none"   : A single replica
             |   - "custom" : Scale between min_replicas and max_replicas
             |   - "auto"   : Auto-scale based on CPU/memory thresholds
-            |               (min/max replicas are not sent for this type)
+            |
+            | min_replicas and max_replicas are only sent with "custom".
             |
             | hibernation_timeout: Minutes idle before the instance hibernates.
             | Set it to null to turn hibernation off, or leave it out to keep
@@ -223,6 +224,14 @@ return [
                     | Worker types:
                     |   - "worker" : Laravel queue worker
                     |   - "custom" : Custom artisan command
+                    |
+                    | Processes have no name in Cloud, so the keys below are
+                    | only used in .laravel-cloud.json. When a process isn't in
+                    | that file, cloud:deploy looks for one on the instance
+                    | with the same settings, then for one of the same type
+                    | with the same queue connection and queues (workers) or
+                    | the same command (custom), before creating a new one.
+                    | A process that already has these settings isn't updated.
                     |
                     */
 
