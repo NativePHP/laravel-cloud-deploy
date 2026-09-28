@@ -72,6 +72,10 @@ php artisan cloud:deploy production
 | `--force` | Skip confirmation prompts |
 | `--dry-run` | Show what would be done without making changes |
 
+A dry run only reads from the Cloud API. It looks everything up the same way a real run does and prints what it
+would create, update or attach, including background processes and databases. It never writes `.laravel-cloud.json`;
+it tells you whether a real run would.
+
 ### Examples
 
 Preview changes without deploying:
@@ -154,7 +158,7 @@ custom processes). A lost state file doesn't lead to duplicate workers.
 ## Requirements
 
 - PHP 8.2+
-- Laravel 11.x or 12.x
+- Laravel 11, 12 or 13
 
 ## License
 
