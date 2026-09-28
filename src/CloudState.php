@@ -15,6 +15,13 @@ class CloudState
      */
     protected array $state = [];
 
+    /**
+     * The state as it was last read from or written to disk.
+     *
+     * @var array<string, mixed>
+     */
+    protected array $persisted = [];
+
     public function __construct(?string $statePath = null)
     {
         $this->statePath = $statePath ?? config('cloud.state_path', base_path('.laravel-cloud.json'));
@@ -26,21 +33,61 @@ class CloudState
      */
     public function load(): void
     {
+        $this->state = [];
+
         if (File::exists($this->statePath)) {
             $contents = File::get($this->statePath);
             $this->state = json_decode($contents, true) ?? [];
         }
+
+        // Older versions wrote a timestamp and the last deployment ID on
+        // every run, so the file changed on every deploy. Neither is kept
+        // any more; they drop out the next time an ID changes.
+        unset($this->state['updated_at']);
+
+        foreach (array_keys($this->state['environments'] ?? []) as $environment) {
+            unset($this->state['environments'][$environment]['last_deployment_id']);
+        }
+
+        $this->persisted = $this->state;
     }
 
     /**
-     * Save the state to disk.
+     * Save the state to disk if any ID has changed since it was loaded or last saved.
+     *
+     * Returns whether the file was written.
      */
-    public function save(): void
+    public function save(): bool
     {
+        if (! $this->isDirty()) {
+            return false;
+        }
+
         File::put(
             $this->statePath,
-            json_encode($this->state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+            json_encode($this->state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES).PHP_EOL
         );
+
+        $this->persisted = $this->state;
+
+        return true;
+    }
+
+    /**
+     * Whether the state differs from what is on disk.
+     */
+    public function isDirty(): bool
+    {
+        // Loose comparison, so key order doesn't count as a change.
+        return $this->state != $this->persisted;
+    }
+
+    /**
+     * The path of the state file.
+     */
+    public function path(): string
+    {
+        return $this->statePath;
     }
 
     /**
@@ -156,22 +203,6 @@ class CloudState
     }
 
     /**
-     * Get the last deployment ID for an environment.
-     */
-    public function getLastDeploymentId(string $environment): ?string
-    {
-        return $this->state['environments'][$environment]['last_deployment_id'] ?? null;
-    }
-
-    /**
-     * Set the last deployment ID for an environment.
-     */
-    public function setLastDeploymentId(string $environment, string $id): void
-    {
-        $this->state['environments'][$environment]['last_deployment_id'] = $id;
-    }
-
-    /**
      * Get the entire state array.
      *
      * @return array<string, mixed>
@@ -199,21 +230,6 @@ class CloudState
         }
 
         $this->state = [];
-    }
-
-    /**
-     * Set a timestamp for when the state was last updated.
-     */
-    public function touch(): void
-    {
-        $this->state['updated_at'] = now()->toIso8601String();
-    }
-
-    /**
-     * Get the last update timestamp.
-     */
-    public function getUpdatedAt(): ?string
-    {
-        return $this->state['updated_at'] ?? null;
+        $this->persisted = [];
     }
 }

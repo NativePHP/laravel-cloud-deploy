@@ -26,9 +26,15 @@ class CloudDeployCommand extends Command
 
     protected bool $isDryRun = false;
 
+    /**
+     * Whether this run wrote the state file.
+     */
+    protected bool $stateWritten = false;
+
     public function handle(): int
     {
-        $this->isDryRun = $this->option('dry-run');
+        $this->isDryRun = (bool) $this->option('dry-run');
+        $this->stateWritten = false;
 
         if (! $this->validateConfig()) {
             return self::FAILURE;
@@ -46,13 +52,11 @@ class CloudDeployCommand extends Command
                 $this->deployEnvironment($envName, $envConfig);
             }
 
-            if (! $this->isDryRun) {
-                $this->state->touch();
-                $this->state->save();
-            }
+            $this->persistState();
 
             $this->newLine();
-            $this->info('Deployment complete!');
+            $this->reportState();
+            $this->info($this->isDryRun ? 'Dry run complete. Nothing was changed.' : 'Deployment complete!');
 
             return self::SUCCESS;
         } catch (RequestException $e) {
@@ -108,6 +112,35 @@ class CloudDeployCommand extends Command
     }
 
     /**
+     * Write the state file if an ID changed. Never writes during a dry run.
+     */
+    protected function persistState(): void
+    {
+        if ($this->isDryRun) {
+            return;
+        }
+
+        if ($this->state->save()) {
+            $this->stateWritten = true;
+        }
+    }
+
+    protected function reportState(): void
+    {
+        $file = basename($this->state->path());
+
+        if ($this->isDryRun) {
+            $this->line($this->state->isDirty()
+                ? "[DRY RUN] {$file} would be updated with the IDs found above. It was not written."
+                : "[DRY RUN] {$file} is up to date. It was not written.");
+
+            return;
+        }
+
+        $this->line($this->stateWritten ? "Updated {$file}." : "{$file} is unchanged.");
+    }
+
+    /**
      * @return array<string, array<string, mixed>>
      */
     protected function getEnvironmentsToDeploy(): array
@@ -148,7 +181,7 @@ class CloudDeployCommand extends Command
             $applicationId = $app['id'];
             $this->line("  Found existing application: {$applicationId}");
             $this->state->setApplicationId($applicationId);
-            $this->state->save();
+            $this->persistState();
 
             return;
         }
@@ -174,7 +207,7 @@ class CloudDeployCommand extends Command
 
         $applicationId = $response['data']['id'];
         $this->state->setApplicationId($applicationId);
-        $this->state->save();
+        $this->persistState();
         $this->info("  Created application: {$applicationId}");
     }
 
@@ -229,7 +262,7 @@ class CloudDeployCommand extends Command
             $environmentId = $env['id'];
             $this->line("  Found existing environment: {$environmentId}");
             $this->state->setEnvironmentId($name, $environmentId);
-            $this->state->save();
+            $this->persistState();
 
             return $environmentId;
         }
@@ -249,7 +282,7 @@ class CloudDeployCommand extends Command
 
         $environmentId = $response['data']['id'];
         $this->state->setEnvironmentId($name, $environmentId);
-        $this->state->save();
+        $this->persistState();
         $this->info("  Created environment: {$environmentId}");
 
         return $environmentId;
@@ -429,8 +462,9 @@ class CloudDeployCommand extends Command
 
             if ($instance) {
                 $instanceId = $instance['id'];
+                $this->line("    Found existing instance {$name}: {$instanceId}");
                 $this->state->setInstanceId($envName, $name, $instanceId);
-                $this->state->save();
+                $this->persistState();
             }
         }
 
@@ -459,7 +493,7 @@ class CloudDeployCommand extends Command
             $response = $this->client->createInstance($environmentId, $instanceData);
             $instanceId = $response['data']['id'];
             $this->state->setInstanceId($envName, $name, $instanceId);
-            $this->state->save();
+            $this->persistState();
         }
 
         if (! empty($config['processes'])) {
@@ -552,7 +586,7 @@ class CloudDeployCommand extends Command
                 $response = $this->client->createBackgroundProcess($instanceId, $processData);
                 $processId = $response['data']['id'];
                 $this->state->setProcessId($envName, $instanceName, $processName, $processId);
-                $this->state->save();
+                $this->persistState();
             }
         }
     }
@@ -608,8 +642,9 @@ class CloudDeployCommand extends Command
 
                 if ($domain) {
                     $domainId = $domain['id'];
+                    $this->line("    Found existing domain {$domainName}: {$domainId}");
                     $this->state->setDomainId($envName, $domainName, $domainId);
-                    $this->state->save();
+                    $this->persistState();
                 }
             }
 
@@ -652,7 +687,7 @@ class CloudDeployCommand extends Command
                 $response = $this->client->createDomain($environmentId, $domainData);
                 $domainId = $response['data']['id'];
                 $this->state->setDomainId($envName, $domainName, $domainId);
-                $this->state->save();
+                $this->persistState();
             }
         }
     }
@@ -667,11 +702,11 @@ class CloudDeployCommand extends Command
             return;
         }
 
+        // The deployment ID isn't kept in the state file. It would change the
+        // file on every deploy, and nothing reads it back.
         $response = $this->client->initiateDeployment($environmentId);
         $deploymentId = $response['data']['id'];
 
-        $this->state->setLastDeploymentId($envName, $deploymentId);
-        $this->state->save();
         $this->info("    Deployment initiated: {$deploymentId}");
 
         $this->line('    Waiting for deployment to complete...');

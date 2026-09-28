@@ -114,7 +114,8 @@ See the published config file for detailed examples and documentation.
 The package maintains a `.laravel-cloud.json` file in your project root to track deployed infrastructure IDs. This
 allows subsequent deployments to update existing resources rather than creating duplicates.
 
-Add it to git and share it with your team or CI tool.
+Add it to git and share it with your team or CI tool. The file is only written when an ID in it changes, so a deploy
+that finds nothing new leaves it alone. Deployment IDs and timestamps aren't kept in it.
 
 ## Requirements
 
