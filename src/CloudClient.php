@@ -5,13 +5,32 @@ declare(strict_types=1);
 namespace NativePhp\LaravelCloudDeploy;
 
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use NativePhp\LaravelCloudDeploy\Enums\CommandStatus;
+use NativePhp\LaravelCloudDeploy\Enums\DeploymentStatus;
 
 class CloudClient
 {
-    protected string $baseUrl = 'https://app.laravel.cloud/api';
+    /**
+     * The maximum number of variables the API accepts in a single request.
+     */
+    public const MAX_VARIABLES_PER_REQUEST = 200;
+
+    /**
+     * Database cluster statuses that mean Cloud is still working on the cluster.
+     */
+    public const BUSY_DATABASE_CLUSTER_STATUSES = [
+        'creating',
+        'updating',
+        'restarting',
+        'upgrading',
+        'moving',
+        'restoring',
+    ];
+
+    protected string $baseUrl = 'https://cloud.laravel.com/api';
 
     protected PendingRequest $http;
 
@@ -23,6 +42,30 @@ class CloudClient
             ->acceptJson()
             ->contentType('application/json')
             ->throw();
+    }
+
+    /**
+     * Fetch every item of a paginated list endpoint by following `links.next`.
+     *
+     * @param  array<string, mixed>  $query
+     * @return array<int, array<string, mixed>>
+     */
+    public function all(string $path, array $query = []): array
+    {
+        $items = [];
+        $response = $this->http->get($path, $query)->json();
+
+        while (true) {
+            array_push($items, ...($response['data'] ?? []));
+
+            $next = $response['links']['next'] ?? null;
+
+            if (! $next) {
+                return $items;
+            }
+
+            $response = $this->http->get($next)->json();
+        }
     }
 
     /**
@@ -40,9 +83,7 @@ class CloudClient
      */
     public function findApplicationByRepository(string $repository): ?array
     {
-        $applications = $this->listApplications();
-
-        foreach ($applications['data'] ?? [] as $app) {
+        foreach ($this->all('/applications') as $app) {
             $repoFullName = $app['attributes']['repository']['full_name'] ?? null;
 
             if ($repoFullName === $repository) {
@@ -56,7 +97,7 @@ class CloudClient
     /**
      * Create a new application.
      *
-     * @param  array{repository: string, name: string, region: string}  $data
+     * @param  array{source_control_provider_type?: string, repository: string, name: string, region: string}  $data
      * @return array<string, mixed>
      */
     public function createApplication(array $data): array
@@ -108,9 +149,7 @@ class CloudClient
      */
     public function findEnvironmentByName(string $applicationId, string $name): ?array
     {
-        $environments = $this->listEnvironments($applicationId);
-
-        foreach ($environments['data'] ?? [] as $env) {
+        foreach ($this->all("/applications/{$applicationId}/environments") as $env) {
             if (($env['attributes']['name'] ?? null) === $name) {
                 return $env;
             }
@@ -133,11 +172,36 @@ class CloudClient
     /**
      * Get an environment by ID.
      *
+     * @param  array<int, string>  $include  Relationships to include, e.g. ['database']
      * @return array<string, mixed>
      */
-    public function getEnvironment(string $environmentId): array
+    public function getEnvironment(string $environmentId, array $include = []): array
     {
-        return $this->http->get("/environments/{$environmentId}")->json();
+        $query = $include === [] ? [] : ['include' => implode(',', $include)];
+
+        return $this->http->get("/environments/{$environmentId}", $query)->json();
+    }
+
+    /**
+     * Get the ID of the database (schema) attached to an environment, if any.
+     */
+    public function getEnvironmentDatabaseSchemaId(string $environmentId): ?string
+    {
+        $environment = $this->getEnvironment($environmentId, ['database']);
+
+        return $environment['data']['relationships']['database']['data']['id'] ?? null;
+    }
+
+    /**
+     * Attach a database (schema) to an environment.
+     *
+     * This replaces whatever database the environment had attached before.
+     *
+     * @return array<string, mixed>
+     */
+    public function attachDatabaseToEnvironment(string $environmentId, string $schemaId): array
+    {
+        return $this->updateEnvironment($environmentId, ['database_schema_id' => $schemaId]);
     }
 
     /**
@@ -160,16 +224,69 @@ class CloudClient
     }
 
     /**
-     * Add environment variables.
+     * Add environment variables without checking for existing keys.
+     *
+     * The API does not de-duplicate appended keys, so calling this twice
+     * with the same key leaves two copies. Use setEnvironmentVariables()
+     * to create or update variables idempotently.
      *
      * @param  array<int, array{key: string, value: string}>  $variables
-     * @return array<string, mixed>
+     * @return array<string, mixed> The response for the last chunk sent
      */
     public function addEnvironmentVariables(string $environmentId, array $variables): array
     {
-        return $this->http->post("/environments/{$environmentId}/variables", [
-            'method' => 'append',
-            'variables' => $variables,
+        return $this->storeEnvironmentVariables($environmentId, $variables, 'append');
+    }
+
+    /**
+     * Create or update environment variables, replacing the values of keys that already exist.
+     *
+     * @param  array<int, array{key: string, value: string}>  $variables
+     * @return array<string, mixed> The response for the last chunk sent
+     */
+    public function setEnvironmentVariables(string $environmentId, array $variables): array
+    {
+        return $this->storeEnvironmentVariables($environmentId, $variables, 'set');
+    }
+
+    /**
+     * Send environment variables in chunks the API will accept.
+     *
+     * @param  array<int, array{key: string, value: string}>  $variables
+     * @param  'append'|'set'  $method
+     * @return array<string, mixed>
+     */
+    protected function storeEnvironmentVariables(string $environmentId, array $variables, string $method): array
+    {
+        $response = [];
+
+        foreach (array_chunk($variables, self::MAX_VARIABLES_PER_REQUEST) as $chunk) {
+            $response = $this->http->post("/environments/{$environmentId}/variables", [
+                'method' => $method,
+                'variables' => $chunk,
+            ])->json();
+        }
+
+        return $response;
+    }
+
+    /**
+     * Delete environment variables by key.
+     *
+     * The API treats this as atomic: if any key does not exist, nothing is
+     * deleted and the request fails with a 422.
+     *
+     * @param  array<int, string>  $keys
+     * @return array<string, mixed>
+     */
+    public function deleteEnvironmentVariables(string $environmentId, array $keys): array
+    {
+        if ($keys === []) {
+            return [];
+        }
+
+        return $this->http->post("/environments/{$environmentId}/variables/delete", [
+            'keys' => array_values($keys),
         ])->json();
     }
 
@@ -188,9 +305,7 @@ class CloudClient
      */
     public function findInstanceByName(string $environmentId, string $name): ?array
     {
-        $instances = $this->listInstances($environmentId);
-
-        foreach ($instances['data'] ?? [] as $instance) {
+        foreach ($this->all("/environments/{$environmentId}/instances") as $instance) {
             if (($instance['attributes']['name'] ?? null) === $name) {
                 return $instance;
             }
@@ -250,6 +365,16 @@ class CloudClient
     }
 
     /**
+     * Get every background process on an instance, across all pages.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    public function allBackgroundProcesses(string $instanceId): array
+    {
+        return $this->all("/instances/{$instanceId}/background-processes");
+    }
+
+    /**
      * Create a background process.
      *
      * @param  array<string, mixed>  $data
@@ -294,9 +419,7 @@ class CloudClient
      */
     public function findDomainByName(string $environmentId, string $name): ?array
     {
-        $domains = $this->listDomains($environmentId);
-
-        foreach ($domains['data'] ?? [] as $domain) {
+        foreach ($this->all("/environments/{$environmentId}/domains") as $domain) {
             if (($domain['attributes']['name'] ?? null) === $name) {
                 return $domain;
             }
@@ -376,7 +499,28 @@ class CloudClient
     }
 
     /**
-     * Wait for a deployment to complete.
+     * Get the build and deploy logs for a deployment.
+     *
+     * @return array<string, mixed>
+     */
+    public function getDeploymentLogs(string $deploymentId): array
+    {
+        return $this->http->get("/deployments/{$deploymentId}/logs")->json();
+    }
+
+    /**
+     * Get the status of a deployment as an enum.
+     */
+    public function getDeploymentStatus(string $deploymentId): DeploymentStatus
+    {
+        $deployment = $this->getDeployment($deploymentId);
+        $status = $deployment['data']['attributes']['status'] ?? 'pending';
+
+        return DeploymentStatus::from($status);
+    }
+
+    /**
+     * Wait for a deployment to reach a terminal status.
      *
      * @param  callable|null  $onStatusChange  Called when status changes
      * @return array<string, mixed> The final deployment state
@@ -399,12 +543,7 @@ class CloudClient
                 $lastStatus = $status;
             }
 
-            // Check for terminal statuses. The API reports stage-dotted
-            // failures (build.failed, deployment.failed, ...) — every one of
-            // them is terminal, while only the deployment stage succeeding
-            // means the deploy is done.
-            if (in_array($status, ['deployed', 'deployment.succeeded', 'failed'])
-                || str_ends_with($status, '.failed')) {
+            if (DeploymentStatus::isTerminalValue($status)) {
                 return $deployment;
             }
 
@@ -458,23 +597,14 @@ class CloudClient
     }
 
     /**
-     * Get IP addresses for whitelisting.
+     * List database clusters.
      *
-     * @return array<string, array{ipv4: string[], ipv6: string[]}>
-     */
-    public function getIpAddresses(): array
-    {
-        return $this->http->get('/ip')->json();
-    }
-
-    /**
-     * List all database clusters.
-     *
+     * @param  array<string, mixed>  $query  Optional filters, e.g. ['filter[type]' => 'laravel_mysql']
      * @return array<string, mixed>
      */
-    public function listDatabaseClusters(): array
+    public function listDatabaseClusters(array $query = []): array
     {
-        return $this->http->get('/databases')->json();
+        return $this->http->get('/databases/clusters', $query)->json();
     }
 
     /**
@@ -482,9 +612,7 @@ class CloudClient
      */
     public function findDatabaseClusterByName(string $name): ?array
     {
-        $clusters = $this->listDatabaseClusters();
-
-        foreach ($clusters['data'] ?? [] as $cluster) {
+        foreach ($this->all('/databases/clusters') as $cluster) {
             if (($cluster['attributes']['name'] ?? null) === $name) {
                 return $cluster;
             }
@@ -494,14 +622,61 @@ class CloudClient
     }
 
     /**
+     * List the database types that can be created, with their versions and config schemas.
+     *
+     * @return array<string, mixed>
+     */
+    public function listDatabaseTypes(): array
+    {
+        return $this->http->get('/databases/types')->json();
+    }
+
+    /**
      * Create a new database cluster.
      *
-     * @param  array{type: string, name: string, region: string, config: array<string, mixed>}  $data
+     * @param  array{type: string, version: string, name: string, region: string, config: array<string, mixed>, create_default_database?: bool}  $data
      * @return array<string, mixed>
      */
     public function createDatabaseCluster(array $data): array
     {
-        return $this->http->post('/databases', $data)->json();
+        return $this->http->post('/databases/clusters', $data)->json();
+    }
+
+    /**
+     * Wait until Cloud has finished working on a database cluster.
+     *
+     * Returns the cluster once its status is no longer one of the busy
+     * statuses (creating, updating and so on). The caller decides what to
+     * do with any status other than "available".
+     *
+     * @return array<string, mixed>
+     */
+    public function waitForDatabaseCluster(
+        string $clusterId,
+        int $timeoutSeconds = 900,
+        int $pollIntervalSeconds = 10,
+        ?callable $onStatusChange = null
+    ): array {
+        $startTime = time();
+        $lastStatus = null;
+
+        while (time() - $startTime < $timeoutSeconds) {
+            $cluster = $this->getDatabaseCluster($clusterId);
+            $status = $cluster['data']['attributes']['status'] ?? 'unknown';
+
+            if ($status !== $lastStatus && $onStatusChange) {
+                $onStatusChange($status, $cluster);
+                $lastStatus = $status;
+            }
+
+            if (! in_array($status, self::BUSY_DATABASE_CLUSTER_STATUSES, true)) {
+                return $cluster;
+            }
+
+            sleep($pollIntervalSeconds);
+        }
+
+        throw new \RuntimeException("Database cluster {$clusterId} was still busy after {$timeoutSeconds} seconds");
     }
 
     /**
@@ -511,18 +686,21 @@ class CloudClient
      */
     public function getDatabaseCluster(string $clusterId): array
     {
-        return $this->http->get("/databases/{$clusterId}")->json();
+        return $this->http->get("/databases/clusters/{$clusterId}")->json();
     }
 
     /**
      * Update a database cluster.
      *
-     * @param  array<string, mixed>  $data
+     * The API expects the full `config` object for the cluster type, so read
+     * the current config and change the keys you need (e.g. `is_public`).
+     *
+     * @param  array{config: array<string, mixed>}  $data
      * @return array<string, mixed>
      */
     public function updateDatabaseCluster(string $clusterId, array $data): array
     {
-        return $this->http->patch("/databases/{$clusterId}", $data)->json();
+        return $this->http->patch("/databases/clusters/{$clusterId}", $data)->json();
     }
 
     /**
@@ -530,18 +708,158 @@ class CloudClient
      */
     public function deleteDatabaseCluster(string $clusterId): Response
     {
-        return $this->http->delete("/databases/{$clusterId}");
+        return $this->http->delete("/databases/clusters/{$clusterId}");
     }
 
     /**
-     * Get a database cluster with schemas included.
+     * List the databases (schemas) in a database cluster.
      *
      * @return array<string, mixed>
      */
-    public function getDatabaseClusterWithSchemas(string $clusterId): array
+    public function listDatabases(string $clusterId): array
     {
-        return $this->http->get("/databases/{$clusterId}", [
-            'include' => 'schemas',
+        return $this->http->get("/databases/clusters/{$clusterId}/databases")->json();
+    }
+
+    /**
+     * Find a database (schema) in a cluster by name.
+     */
+    public function findDatabaseByName(string $clusterId, string $name): ?array
+    {
+        foreach ($this->all("/databases/clusters/{$clusterId}/databases") as $schema) {
+            if (($schema['attributes']['name'] ?? null) === $name) {
+                return $schema;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Create a database (schema) in a database cluster.
+     *
+     * Attach it to an environment with updateEnvironment($id, ['database_schema_id' => ...]).
+     *
+     * @return array<string, mixed>
+     */
+    public function createDatabase(string $clusterId, string $name): array
+    {
+        return $this->http->post("/databases/clusters/{$clusterId}/databases", [
+            'name' => $name,
         ])->json();
+    }
+
+    /**
+     * Get a database (schema) in a database cluster.
+     *
+     * @return array<string, mixed>
+     */
+    public function getDatabase(string $clusterId, string $databaseId): array
+    {
+        return $this->http->get("/databases/clusters/{$clusterId}/databases/{$databaseId}")->json();
+    }
+
+    /**
+     * Get the organization the API token belongs to.
+     *
+     * @return array<string, mixed>
+     */
+    public function getOrganization(): array
+    {
+        return $this->http->get('/meta/organization')->json();
+    }
+
+    /**
+     * Check whether the API token is accepted by Cloud.
+     *
+     * Returns false for a 401 (missing, expired or revoked token). Any other
+     * failure is rethrown so network or server errors aren't mistaken for a
+     * bad token.
+     */
+    public function hasValidToken(): bool
+    {
+        try {
+            $this->getOrganization();
+
+            return true;
+        } catch (RequestException $e) {
+            if ($e->response->status() === 401) {
+                return false;
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * List the regions Cloud can deploy to.
+     *
+     * @return array<string, mixed>
+     */
+    public function listRegions(): array
+    {
+        return $this->http->get('/meta/regions')->json();
+    }
+
+    /**
+     * List caches.
+     *
+     * @param  array<string, mixed>  $query  Optional filters, e.g. ['filter[type]' => 'laravel_valkey']
+     * @return array<string, mixed>
+     */
+    public function listCaches(array $query = []): array
+    {
+        return $this->http->get('/caches', $query)->json();
+    }
+
+    /**
+     * Get a cache by ID.
+     *
+     * @return array<string, mixed>
+     */
+    public function getCache(string $cacheId): array
+    {
+        return $this->http->get("/caches/{$cacheId}")->json();
+    }
+
+    /**
+     * List the cache types that can be created, with their regions and sizes.
+     *
+     * @return array<string, mixed>
+     */
+    public function listCacheTypes(): array
+    {
+        return $this->http->get('/caches/types')->json();
+    }
+
+    /**
+     * List object storage buckets.
+     *
+     * @param  array<string, mixed>  $query  Optional filters, e.g. ['filter[visibility]' => 'public']
+     * @return array<string, mixed>
+     */
+    public function listBuckets(array $query = []): array
+    {
+        return $this->http->get('/buckets', $query)->json();
+    }
+
+    /**
+     * Get an object storage bucket by ID.
+     *
+     * @return array<string, mixed>
+     */
+    public function getBucket(string $bucketId): array
+    {
+        return $this->http->get("/buckets/{$bucketId}")->json();
+    }
+
+    /**
+     * List the access keys for an object storage bucket.
+     *
+     * @return array<string, mixed>
+     */
+    public function listBucketKeys(string $bucketId): array
+    {
+        return $this->http->get("/buckets/{$bucketId}/keys")->json();
     }
 }

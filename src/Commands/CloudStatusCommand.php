@@ -8,6 +8,7 @@ use Illuminate\Console\Command;
 use Illuminate\Http\Client\RequestException;
 use NativePhp\LaravelCloudDeploy\CloudClient;
 use NativePhp\LaravelCloudDeploy\CloudState;
+use NativePhp\LaravelCloudDeploy\Enums\DeploymentStatus;
 
 class CloudStatusCommand extends Command
 {
@@ -131,7 +132,7 @@ class CloudStatusCommand extends Command
 
         $this->line('  <fg=gray>Push to Deploy:</> '.($attrs['uses_push_to_deploy'] ?? false ? 'Yes' : 'No'));
         $this->line('  <fg=gray>Octane:</> '.($attrs['uses_octane'] ?? false ? 'Yes' : 'No'));
-        $this->line('  <fg=gray>Web Server:</> '.($attrs['uses_web_server'] ?? false ? 'Yes' : 'No'));
+        $this->line('  <fg=gray>Hibernation:</> '.($attrs['uses_hibernation'] ?? false ? 'Yes' : 'No'));
 
         // Show instances
         $this->showInstances($environmentId);
@@ -159,7 +160,9 @@ class CloudStatusCommand extends Command
             $name = $attrs['name'] ?? 'Unknown';
             $type = $attrs['type'] ?? 'N/A';
             $size = $attrs['size'] ?? 'N/A';
-            $replicas = $attrs['replicas'] ?? 0;
+            $min = $attrs['min_replicas'] ?? 0;
+            $max = $attrs['max_replicas'] ?? $min;
+            $replicas = $min === $max ? (string) $min : "{$min}-{$max}";
 
             $this->line("    • {$name} ({$type})");
             $this->line("      <fg=gray>Size:</> {$size}");
@@ -183,19 +186,14 @@ class CloudStatusCommand extends Command
         if ($latest) {
             $attrs = $latest['attributes'] ?? [];
             $status = $attrs['status'] ?? 'unknown';
-            $createdAt = $attrs['created_at'] ?? 'N/A';
+            $startedAt = $attrs['started_at'] ?? 'N/A';
             $commit = $attrs['commit_hash'] ?? 'N/A';
 
-            $statusColor = match ($status) {
-                'deployed', 'deployment.succeeded' => 'green',
-                'failed', 'deployment.failed' => 'red',
-                'deploying', 'building', 'pending' => 'yellow',
-                default => 'gray',
-            };
+            $statusColor = DeploymentStatus::tryFrom($status)?->color() ?? 'gray';
 
             $this->line("    <fg=gray>Status:</> <fg={$statusColor}>{$status}</>");
             $this->line('    <fg=gray>Commit:</> '.substr($commit, 0, 8));
-            $this->line("    <fg=gray>Created:</> {$createdAt}");
+            $this->line("    <fg=gray>Started:</> {$startedAt}");
         }
     }
 
@@ -213,8 +211,13 @@ class CloudStatusCommand extends Command
         foreach ($domains['data'] as $domain) {
             $attrs = $domain['attributes'] ?? [];
             $name = $attrs['name'] ?? 'Unknown';
-            $verified = $attrs['is_verified'] ?? false;
-            $status = $verified ? '<fg=green>verified</>' : '<fg=yellow>pending</>';
+            $hostnameStatus = $attrs['hostname_status'] ?? 'pending';
+            $color = match ($hostnameStatus) {
+                'verified' => 'green',
+                'failed', 'disabled' => 'red',
+                default => 'yellow',
+            };
+            $status = "<fg={$color}>{$hostnameStatus}</>";
 
             $this->line("    • {$name} ({$status})");
         }

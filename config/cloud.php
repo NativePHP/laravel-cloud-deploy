@@ -20,23 +20,32 @@ return [
     | Application Configuration
     |--------------------------------------------------------------------------
     |
-    | Configure your Laravel Cloud application. The repository should match
-    | your GitHub repository in "owner/repo" format. The region determines
-    | where your application will be deployed.
+    | Configure your Laravel Cloud application. The repository should be in
+    | "owner/repo" format. The region determines where your application will
+    | be deployed.
+    |
+    | source_control is the provider the repository lives on: "github",
+    | "gitlab", "gitlab_self_hosted" or "bitbucket". The provider must
+    | already be connected to your Cloud organization.
     |
     | Supported regions:
     |   - "us-east-2"      (Ohio)
     |   - "us-east-1"      (N. Virginia)
+    |   - "ca-central-1"   (Canada)
+    |   - "eu-west-1"      (Ireland)
     |   - "eu-west-2"      (London)
     |   - "eu-central-1"   (Frankfurt)
+    |   - "me-central-1"   (UAE)
     |   - "ap-southeast-1" (Singapore)
     |   - "ap-southeast-2" (Sydney)
+    |   - "ap-northeast-1" (Tokyo)
     |
     */
 
     'application' => [
         'name' => env('APP_NAME', 'My Application'),
         'repository' => env('LARAVEL_CLOUD_REPOSITORY'),
+        'source_control' => env('LARAVEL_CLOUD_SOURCE_CONTROL', 'github'),
         'region' => env('LARAVEL_CLOUD_REGION', 'us-east-2'),
     ],
 
@@ -73,8 +82,8 @@ return [
             | PHP & Node Configuration
             |------------------------------------------------------------------
             |
-            | Supported PHP versions: "8.2:1", "8.3:1", "8.4:1"
-            | Supported Node versions: "20", "22"
+            | Supported PHP versions: "8.2:1", "8.3:1", "8.4:1", "8.5:1"
+            | Supported Node versions: "20", "22", "24"
             |
             */
 
@@ -109,16 +118,14 @@ return [
             |
             | Configure how your application handles HTTP requests.
             |
-            | web_server: Use traditional PHP-FPM (true) or Octane (false)
             | octane: Enable Laravel Octane for high-performance serving
-            | hibernation: Enable sleep mode when idle to reduce costs
-            | timeout: Request timeout in seconds
+            | timeout: Request timeout in seconds (5-60)
+            |
+            | Hibernation is set per instance, see "hibernation_timeout" below.
             |
             */
 
-            'web_server' => false,
             'octane' => false,
-            'hibernation' => false,
             'timeout' => 30,
 
             /*
@@ -143,8 +150,9 @@ return [
                 'purge_cache_on_deploy' => true,
 
                 'response_headers' => [
-                    'frame' => 'deny',           // deny, sameorigin, or null
-                    'content_type' => 'nosniff', // nosniff or null
+                    'frame' => 'deny',           // deny, sameorigin, or all
+                    'content_type' => 'nosniff', // nosniff or none
+                    // 'robots_tag' => 'noindex, nofollow', // or 'index, follow'
                     'hsts' => [
                         'enabled' => true,
                         'max_age' => 31536000,         // 1 year
@@ -154,8 +162,8 @@ return [
                 ],
 
                 'firewall' => [
-                    'rate_limit_level' => 'challenge', // challenge, block, or null
-                    'under_attack_mode' => false,
+                    'block_path' => false,
+                    'browser_integrity_check' => false,
                 ],
             ],
 
@@ -174,10 +182,19 @@ return [
             | (named "App", flex-512mb) with every new environment, and an
             | environment can only have one app-type instance.
             |
+            | New instances can be of type "service" (workers) or "managed_queue".
+            | The type can't be changed after the instance is created.
+            |
             | Scaling types:
-            |   - "none"   : Fixed number of replicas
-            |   - "manual" : Manual scaling
+            |   - "none"   : A single replica
+            |   - "custom" : Scale between min_replicas and max_replicas
             |   - "auto"   : Auto-scale based on CPU/memory thresholds
+            |
+            | min_replicas and max_replicas are only sent with "custom".
+            |
+            | hibernation_timeout: Minutes idle before the instance hibernates.
+            | Set it to null to turn hibernation off, or leave it out to keep
+            | whatever is set in Cloud. Only applied to existing instances.
             |
             */
 
@@ -195,6 +212,8 @@ return [
 
                     'scheduler' => false,
 
+                    // 'hibernation_timeout' => null,
+
                     /*
                     |--------------------------------------------------------------
                     | Background Processes (Queue Workers)
@@ -205,6 +224,14 @@ return [
                     | Worker types:
                     |   - "worker" : Laravel queue worker
                     |   - "custom" : Custom artisan command
+                    |
+                    | Processes have no name in Cloud, so the keys below are
+                    | only used in .laravel-cloud.json. When a process isn't in
+                    | that file, cloud:deploy looks for one on the instance
+                    | with the same settings, then for one of the same type
+                    | with the same queue connection and queues (workers) or
+                    | the same command (custom), before creating a new one.
+                    | A process that already has these settings isn't updated.
                     |
                     */
 
@@ -289,6 +316,10 @@ return [
             |   - "www_to_root" : www.example.com → example.com
             |   - null          : No redirect
             |
+            | Redirect and wildcard settings only apply when the domain is
+            | created. After that the API only lets you change the
+            | verification_method ("pre_verification" or "real_time").
+            |
             */
 
             'domains' => [
@@ -337,26 +368,52 @@ return [
     | Database Clusters
     |--------------------------------------------------------------------------
     |
-    | Configure database clusters for your application. Clusters are shared
-    | across environments - each environment gets its own schema within
-    | the cluster when attached.
+    | The database clusters your environments use, keyed by cluster name.
+    | Clusters belong to your Cloud organization and can be shared by
+    | several environments. Each environment gets one database (schema)
+    | in a cluster.
+    |
+    | For every environment it deploys, cloud:deploy:
+    |
+    |   1. Finds the cluster by name. Only if there's no cluster with that
+    |      name does it create one with the type, version, region and
+    |      config below (and asks first, unless you pass --force).
+    |   2. Finds the environment's database in the cluster by name, or
+    |      creates it. The name is the environment name unless you give
+    |      one: 'environments' => ['production', 'staging' => 'stage_db'].
+    |   3. Attaches that database to the environment, unless it already is.
+    |
+    | Cluster and database names are 3-40 characters of a-z, 0-9, "_"
+    | and "-".
+    |
+    | It never detaches, drops or recreates anything. If an environment
+    | already has a different database attached, it leaves it alone and
+    | prints a warning. An existing cluster's settings aren't changed.
+    |
+    | The cluster and database IDs are kept in .laravel-cloud.json. When
+    | they aren't there, they're looked up by name. --dry-run prints what
+    | would be created or attached without changing anything.
     |
     | Supported types:
-    |   - "laravel_mysql_8"              (Laravel MySQL 8 - Serverless)
-    |   - "aws_rds_mysql_8"              (AWS RDS MySQL 8)
-    |   - "neon_serverless_postgres_18"  (Neon Serverless Postgres 18)
-    |   - "neon_serverless_postgres_17"  (Neon Serverless Postgres 17)
-    |   - "neon_serverless_postgres_16"  (Neon Serverless Postgres 16)
+    |   - "laravel_mysql"             (Laravel MySQL)
+    |   - "neon_serverless_postgres"  (Laravel Serverless Postgres, Neon)
+    |   - "aws_rds_mysql"             (AWS RDS MySQL)
+    |   - "aws_rds_postgres"          (AWS RDS Postgres)
+    |
+    | Each type has its own versions and config fields. GET /databases/types
+    | lists them. The old versioned types (e.g. "laravel_mysql_8") are
+    | retired but still accepted.
     |
     */
 
     'databases' => [
 
         // 'main' => [
-        //     'type' => 'laravel_mysql_8',
+        //     'type' => 'neon_serverless_postgres',
+        //     'version' => '18', // one of the versions from GET /databases/types
         //     'region' => env('LARAVEL_CLOUD_REGION', 'us-east-2'),
         //
-        //     // Serverless configuration (Laravel MySQL / Neon Postgres)
+        //     // Serverless configuration (Neon Postgres)
         //     'config' => [
         //         'cu_min' => 0.25,        // Minimum compute units
         //         'cu_max' => 1,           // Maximum compute units
@@ -364,17 +421,19 @@ return [
         //         'retention_days' => 7,   // Backup retention (0-30)
         //     ],
         //
-        //     // Attach to environments (creates a schema per environment)
+        //     // Environments that get a database in this cluster. Neon
+        //     // clusters also keep the default database Cloud creates.
         //     'environments' => ['production'],
         // ],
 
-        // Example: AWS RDS MySQL configuration
-        // 'rds-database' => [
-        //     'type' => 'aws_rds_mysql_8',
+        // Example: Laravel MySQL configuration
+        // 'mysql' => [
+        //     'type' => 'laravel_mysql',
+        //     'version' => '8.4', // one of the versions from GET /databases/types
         //     'region' => 'us-east-2',
         //     'config' => [
-        //         'size' => 'db-flex.m-1vcpu-1gb',
-        //         'storage' => 20,          // GB (5-1000)
+        //         'size' => 'mysql-flex-512mb',
+        //         'storage' => 5,           // GB (5-1000)
         //         'is_public' => false,
         //         'uses_scheduled_snapshots' => true,
         //         'retention_days' => 7,

@@ -8,6 +8,7 @@ use Illuminate\Console\Command;
 use Illuminate\Http\Client\RequestException;
 use NativePhp\LaravelCloudDeploy\CloudClient;
 use NativePhp\LaravelCloudDeploy\CloudState;
+use NativePhp\LaravelCloudDeploy\Enums\DeploymentStatus;
 
 class CloudDeployCommand extends Command
 {
@@ -25,9 +26,22 @@ class CloudDeployCommand extends Command
 
     protected bool $isDryRun = false;
 
+    /**
+     * Whether this run wrote the state file.
+     */
+    protected bool $stateWritten = false;
+
+    /**
+     * The database each environment should have attached, keyed by environment name.
+     *
+     * @var array<string, array{cluster: string, schema: string, config: array<string, mixed>}>
+     */
+    protected array $databaseAttachments = [];
+
     public function handle(): int
     {
-        $this->isDryRun = $this->option('dry-run');
+        $this->isDryRun = (bool) $this->option('dry-run');
+        $this->stateWritten = false;
 
         if (! $this->validateConfig()) {
             return self::FAILURE;
@@ -45,13 +59,11 @@ class CloudDeployCommand extends Command
                 $this->deployEnvironment($envName, $envConfig);
             }
 
-            if (! $this->isDryRun) {
-                $this->state->touch();
-                $this->state->save();
-            }
+            $this->persistState();
 
             $this->newLine();
-            $this->info('Deployment complete!');
+            $this->reportState();
+            $this->info($this->isDryRun ? 'Dry run complete. Nothing was changed.' : 'Deployment complete!');
 
             return self::SUCCESS;
         } catch (RequestException $e) {
@@ -81,7 +93,7 @@ class CloudDeployCommand extends Command
 
         if (empty($token)) {
             $this->error('LARAVEL_CLOUD_TOKEN is not set in your .env file.');
-            $this->line('Generate a token at: https://cloud.laravel.com/settings/api-tokens');
+            $this->line('Generate a token in your Laravel Cloud organization settings, under "API tokens".');
 
             return false;
         }
@@ -103,7 +115,81 @@ class CloudDeployCommand extends Command
             return false;
         }
 
+        try {
+            $this->databaseAttachments = $this->resolveDatabaseAttachments(config('cloud.databases', []));
+        } catch (\InvalidArgumentException $e) {
+            $this->error($e->getMessage());
+
+            return false;
+        }
+
         return true;
+    }
+
+    /**
+     * Work out which database each environment should have from the "databases" config.
+     *
+     * An entry in a cluster's "environments" list is either an environment
+     * name, in which case the database is named after the environment, or
+     * an environment => database name pair.
+     *
+     * @param  array<string, array<string, mixed>>  $clusters
+     * @return array<string, array{cluster: string, schema: string, config: array<string, mixed>}>
+     */
+    protected function resolveDatabaseAttachments(array $clusters): array
+    {
+        $attachments = [];
+
+        foreach ($clusters as $clusterName => $clusterConfig) {
+            foreach ($clusterConfig['environments'] ?? [] as $key => $value) {
+                [$environment, $schema] = is_int($key) ? [$value, $value] : [$key, $value];
+
+                if (! is_string($environment) || ! is_string($schema) || $schema === '') {
+                    throw new \InvalidArgumentException("The environments list for database cluster '{$clusterName}' should contain environment names or environment => database name pairs.");
+                }
+
+                if (isset($attachments[$environment])) {
+                    throw new \InvalidArgumentException("Environment '{$environment}' is listed under more than one database cluster. An environment can only have one database attached.");
+                }
+
+                $attachments[$environment] = [
+                    'cluster' => (string) $clusterName,
+                    'schema' => $schema,
+                    'config' => $clusterConfig,
+                ];
+            }
+        }
+
+        return $attachments;
+    }
+
+    /**
+     * Write the state file if an ID changed. Never writes during a dry run.
+     */
+    protected function persistState(): void
+    {
+        if ($this->isDryRun) {
+            return;
+        }
+
+        if ($this->state->save()) {
+            $this->stateWritten = true;
+        }
+    }
+
+    protected function reportState(): void
+    {
+        $file = basename($this->state->path());
+
+        if ($this->isDryRun) {
+            $this->line($this->state->isDirty()
+                ? "[DRY RUN] {$file} would be updated with the IDs found above. It was not written."
+                : "[DRY RUN] {$file} is up to date. It was not written.");
+
+            return;
+        }
+
+        $this->line($this->stateWritten ? "Updated {$file}." : "{$file} is unchanged.");
     }
 
     /**
@@ -147,7 +233,7 @@ class CloudDeployCommand extends Command
             $applicationId = $app['id'];
             $this->line("  Found existing application: {$applicationId}");
             $this->state->setApplicationId($applicationId);
-            $this->state->save();
+            $this->persistState();
 
             return;
         }
@@ -165,6 +251,7 @@ class CloudDeployCommand extends Command
         $this->line("  Creating application: {$name}");
 
         $response = $this->client->createApplication([
+            'source_control_provider_type' => config('cloud.application.source_control', 'github'),
             'repository' => $repository,
             'name' => $name,
             'region' => $region,
@@ -172,7 +259,7 @@ class CloudDeployCommand extends Command
 
         $applicationId = $response['data']['id'];
         $this->state->setApplicationId($applicationId);
-        $this->state->save();
+        $this->persistState();
         $this->info("  Created application: {$applicationId}");
     }
 
@@ -187,12 +274,14 @@ class CloudDeployCommand extends Command
         $environmentId = $this->ensureEnvironment($name, $config);
 
         if (! $environmentId && $this->isDryRun) {
+            $this->configureDatabase($name, null);
             $this->warn("  [DRY RUN] Skipping further configuration for {$name}");
 
             return;
         }
 
         $this->configureEnvironment($environmentId, $config);
+        $this->configureDatabase($name, $environmentId);
         $this->syncEnvironmentVariables($name, $environmentId);
         $this->configureInstances($name, $environmentId, $config['instances'] ?? []);
         $this->configureDomains($name, $environmentId, $config['domains'] ?? []);
@@ -227,7 +316,7 @@ class CloudDeployCommand extends Command
             $environmentId = $env['id'];
             $this->line("  Found existing environment: {$environmentId}");
             $this->state->setEnvironmentId($name, $environmentId);
-            $this->state->save();
+            $this->persistState();
 
             return $environmentId;
         }
@@ -247,7 +336,7 @@ class CloudDeployCommand extends Command
 
         $environmentId = $response['data']['id'];
         $this->state->setEnvironmentId($name, $environmentId);
-        $this->state->save();
+        $this->persistState();
         $this->info("  Created environment: {$environmentId}");
 
         return $environmentId;
@@ -290,17 +379,12 @@ class CloudDeployCommand extends Command
             $updateData['deploy_command'] = implode(' && ', $config['deploy_commands']);
         }
 
-        if (isset($config['web_server'])) {
-            $updateData['uses_web_server'] = $config['web_server'];
-        }
-
         if (isset($config['octane'])) {
             $updateData['uses_octane'] = $config['octane'];
         }
 
-        if (isset($config['hibernation']) && $config['hibernation']) {
-            // Only set sleep_timeout if hibernation is enabled
-            $updateData['sleep_timeout'] = $config['timeout'] ?? 30;
+        if (isset($config['timeout'])) {
+            $updateData['timeout'] = $config['timeout'];
         }
 
         if (isset($config['vanity_domain'])) {
@@ -329,6 +413,10 @@ class CloudDeployCommand extends Command
                     $updateData['response_headers_content_type'] = $headers['content_type'];
                 }
 
+                if (isset($headers['robots_tag'])) {
+                    $updateData['response_headers_robots_tag'] = $headers['robots_tag'];
+                }
+
                 if (isset($headers['hsts']) && ($headers['hsts']['enabled'] ?? false)) {
                     $updateData['response_headers_hsts'] = [
                         'max_age' => $headers['hsts']['max_age'] ?? 31536000,
@@ -341,12 +429,12 @@ class CloudDeployCommand extends Command
             if (isset($network['firewall'])) {
                 $firewall = $network['firewall'];
 
-                if (isset($firewall['rate_limit_level'])) {
-                    $updateData['firewall_rate_limit_level'] = $firewall['rate_limit_level'];
+                if (isset($firewall['block_path'])) {
+                    $updateData['firewall_block_path'] = $firewall['block_path'];
                 }
 
-                if (isset($firewall['under_attack_mode'])) {
-                    $updateData['firewall_under_attack_mode'] = $firewall['under_attack_mode'];
+                if (isset($firewall['browser_integrity_check'])) {
+                    $updateData['firewall_browser_integrity_check'] = $firewall['browser_integrity_check'];
                 }
             }
         }
@@ -365,6 +453,194 @@ class CloudDeployCommand extends Command
 
         $this->client->updateEnvironment($environmentId, $updateData);
         $this->line('    Environment configured.');
+    }
+
+    /**
+     * Make sure the environment's database exists and is attached.
+     *
+     * Finds the cluster by name (creating it only when it's missing), makes
+     * sure the environment's database exists in it and attaches it. Nothing
+     * is ever detached, dropped or recreated: if the environment already has
+     * a different database attached, it's left alone with a warning.
+     *
+     * $environmentId is null during a dry run for an environment that would
+     * be created.
+     */
+    protected function configureDatabase(string $envName, ?string $environmentId): void
+    {
+        $attachment = $this->databaseAttachments[$envName] ?? null;
+
+        if (! $attachment) {
+            return;
+        }
+
+        $this->line('  Configuring database...');
+
+        $clusterId = $this->ensureDatabaseCluster($attachment['cluster'], $attachment['config']);
+        $schemaId = $this->ensureDatabaseSchema($attachment['cluster'], $clusterId, $attachment['schema']);
+
+        $this->attachDatabase($environmentId, $attachment['cluster'], $attachment['schema'], $schemaId);
+    }
+
+    /**
+     * @param  array<string, mixed>  $config
+     */
+    protected function ensureDatabaseCluster(string $name, array $config): ?string
+    {
+        $clusterId = $this->state->getDatabaseClusterId($name);
+
+        if ($clusterId) {
+            $this->line("    Using cached database cluster ID: {$clusterId}");
+
+            return $clusterId;
+        }
+
+        $cluster = $this->client->findDatabaseClusterByName($name);
+
+        if ($cluster) {
+            $clusterId = $cluster['id'];
+            $this->line("    Found existing database cluster {$name}: {$clusterId}");
+            $this->state->setDatabaseClusterId($name, $clusterId);
+            $this->persistState();
+
+            return $clusterId;
+        }
+
+        $type = $config['type'] ?? null;
+
+        $clusterData = [
+            'name' => $name,
+            'type' => $type,
+            'version' => isset($config['version']) ? (string) $config['version'] : null,
+            'region' => $config['region'] ?? config('cloud.application.region'),
+            'config' => $config['config'] ?? [],
+        ];
+
+        // Each environment's database is created by name below, so don't let
+        // Cloud add an unused default one. Neon clusters can't skip it.
+        if (! str_starts_with((string) $type, 'neon_serverless_postgres')) {
+            $clusterData['create_default_database'] = false;
+        }
+
+        if ($this->isDryRun) {
+            $this->warn("    [DRY RUN] Would create database cluster {$name} with: ".json_encode($clusterData));
+
+            return null;
+        }
+
+        if (! $this->option('force') && ! $this->confirm("Database cluster '{$name}' not found. Create it?")) {
+            throw new \RuntimeException('Aborted.');
+        }
+
+        $this->line("    Creating database cluster: {$name}");
+
+        $response = $this->client->createDatabaseCluster($clusterData);
+
+        $clusterId = $response['data']['id'];
+        $this->state->setDatabaseClusterId($name, $clusterId);
+        $this->persistState();
+        $this->info("    Created database cluster: {$clusterId}");
+
+        return $clusterId;
+    }
+
+    protected function ensureDatabaseSchema(string $clusterName, ?string $clusterId, string $name): ?string
+    {
+        $schemaId = $this->state->getDatabaseSchemaId($clusterName, $name);
+
+        if ($schemaId) {
+            $this->line("    Using cached ID for database {$name}: {$schemaId}");
+
+            return $schemaId;
+        }
+
+        if (! $clusterId) {
+            // Dry run: the cluster would be created, so the database would be too.
+            $this->warn("    [DRY RUN] Would create database {$name} in {$clusterName}");
+
+            return null;
+        }
+
+        $schema = $this->client->findDatabaseByName($clusterId, $name);
+
+        if ($schema) {
+            $schemaId = $schema['id'];
+            $this->line("    Found existing database {$name}: {$schemaId}");
+            $this->state->setDatabaseSchemaId($clusterName, $name, $schemaId);
+            $this->persistState();
+
+            return $schemaId;
+        }
+
+        if ($this->isDryRun) {
+            $this->warn("    [DRY RUN] Would create database {$name} in {$clusterName}");
+
+            return null;
+        }
+
+        // A new cluster takes a few minutes to come up, and a database can't
+        // be created in it until it has.
+        $cluster = $this->client->waitForDatabaseCluster(
+            $clusterId,
+            onStatusChange: function (string $status) {
+                if (in_array($status, CloudClient::BUSY_DATABASE_CLUSTER_STATUSES, true)) {
+                    $this->line("      Waiting for the cluster: {$status}");
+                }
+            }
+        );
+
+        $status = $cluster['data']['attributes']['status'] ?? 'unknown';
+
+        if ($status !== 'available') {
+            throw new \RuntimeException("Database cluster {$clusterName} is {$status}, so the database {$name} can't be created in it.");
+        }
+
+        $this->line("    Creating database {$name} in {$clusterName}");
+
+        $response = $this->client->createDatabase($clusterId, $name);
+
+        $schemaId = $response['data']['id'];
+        $this->state->setDatabaseSchemaId($clusterName, $name, $schemaId);
+        $this->persistState();
+        $this->info("    Created database: {$schemaId}");
+
+        return $schemaId;
+    }
+
+    protected function attachDatabase(?string $environmentId, string $clusterName, string $schemaName, ?string $schemaId): void
+    {
+        $label = "{$clusterName}/{$schemaName}";
+
+        if (! $environmentId || ! $schemaId) {
+            // Dry run: the environment or the database doesn't exist yet.
+            $this->warn("    [DRY RUN] Would attach database {$label}");
+
+            return;
+        }
+
+        $attachedId = $this->client->getEnvironmentDatabaseSchemaId($environmentId);
+
+        if ($attachedId === $schemaId) {
+            $this->line("    Database {$label} is already attached.");
+
+            return;
+        }
+
+        if ($attachedId !== null) {
+            $this->warn("    Another database ({$attachedId}) is attached to this environment, so {$label} was not attached.");
+            $this->warn('    cloud:deploy never detaches a database. Detach it in the Cloud dashboard first if you want to switch.');
+
+            return;
+        }
+
+        if ($this->isDryRun) {
+            $this->warn("    [DRY RUN] Would attach database {$label} ({$schemaId})");
+
+            return;
+        }
+
+        $this->client->attachDatabaseToEnvironment($environmentId, $schemaId);
+        $this->line("    Attached database {$label}.");
     }
 
     protected function syncEnvironmentVariables(string $envName, string $environmentId): void
@@ -394,7 +670,9 @@ class CloudDeployCommand extends Command
             return;
         }
 
-        $this->client->addEnvironmentVariables($environmentId, $variables);
+        // "set" updates keys that already exist, so re-running a deploy
+        // doesn't pile up duplicate variables the way "append" would.
+        $this->client->setEnvironmentVariables($environmentId, $variables);
         $this->line('    Synced '.count($variables).' variables.');
     }
 
@@ -426,37 +704,34 @@ class CloudDeployCommand extends Command
 
             if ($instance) {
                 $instanceId = $instance['id'];
+                $this->line("    Found existing instance {$name}: {$instanceId}");
                 $this->state->setInstanceId($envName, $name, $instanceId);
-                $this->state->save();
+                $this->persistState();
             }
         }
 
-        $instanceData = $this->buildInstanceData($config);
+        $instanceData = $this->buildInstanceData($config, creating: ! $instanceId);
 
         if ($instanceId) {
             $this->line("    Updating instance: {$name}");
 
             if ($this->isDryRun) {
                 $this->warn('      [DRY RUN] Would update instance with: '.json_encode($instanceData));
-
-                return;
+            } else {
+                $this->client->updateInstance($instanceId, $instanceData);
             }
-
-            $this->client->updateInstance($instanceId, $instanceData);
         } else {
             $this->line("    Creating instance: {$name}");
 
             if ($this->isDryRun) {
                 $this->warn('      [DRY RUN] Would create instance with: '.json_encode($instanceData));
-
-                return;
+            } else {
+                $instanceData['name'] = $name;
+                $response = $this->client->createInstance($environmentId, $instanceData);
+                $instanceId = $response['data']['id'];
+                $this->state->setInstanceId($envName, $name, $instanceId);
+                $this->persistState();
             }
-
-            $instanceData['name'] = $name;
-            $response = $this->client->createInstance($environmentId, $instanceData);
-            $instanceId = $response['data']['id'];
-            $this->state->setInstanceId($envName, $name, $instanceId);
-            $this->state->save();
         }
 
         if (! empty($config['processes'])) {
@@ -468,11 +743,13 @@ class CloudDeployCommand extends Command
      * @param  array<string, mixed>  $config
      * @return array<string, mixed>
      */
-    protected function buildInstanceData(array $config): array
+    protected function buildInstanceData(array $config, bool $creating): array
     {
         $data = [];
 
-        if (isset($config['type'])) {
+        // The type can only be set when creating an instance (service or
+        // managed_queue); the update endpoint doesn't accept it.
+        if ($creating && isset($config['type'])) {
             $data['type'] = $config['type'];
         }
 
@@ -484,11 +761,16 @@ class CloudDeployCommand extends Command
             $data['uses_scheduler'] = $config['scheduler'];
         }
 
-        if (isset($config['scaling'])) {
-            $scaling = $config['scaling'];
+        if (isset($config['scaling']) || $creating) {
+            $scaling = $config['scaling'] ?? [];
             $data['scaling_type'] = $scaling['type'] ?? 'none';
-            $data['min_replicas'] = $scaling['min_replicas'] ?? 1;
-            $data['max_replicas'] = $scaling['max_replicas'] ?? 1;
+
+            // Replica counts only apply to custom scaling, and the API
+            // rejects them with auto.
+            if ($data['scaling_type'] === 'custom') {
+                $data['min_replicas'] = $scaling['min_replicas'] ?? 1;
+                $data['max_replicas'] = $scaling['max_replicas'] ?? 1;
+            }
 
             if (isset($scaling['cpu_threshold'])) {
                 $data['scaling_cpu_threshold_percentage'] = $scaling['cpu_threshold'];
@@ -499,44 +781,206 @@ class CloudDeployCommand extends Command
             }
         }
 
+        if ($creating) {
+            // Required on create, even though only managed queues use them.
+            $data['visibility_timeout'] = $config['visibility_timeout'] ?? null;
+            $data['shutdown_timeout'] = $config['shutdown_timeout'] ?? null;
+        } elseif (array_key_exists('hibernation_timeout', $config)) {
+            // Minutes before the instance hibernates; null turns it off.
+            $data['hibernation_timeout'] = $config['hibernation_timeout'];
+        }
+
         return $data;
     }
 
     /**
+     * $instanceId is null during a dry run for an instance that would be created.
+     *
      * @param  array<string, array<string, mixed>>  $processes
      */
-    protected function configureBackgroundProcesses(string $envName, string $instanceName, string $instanceId, array $processes): void
+    protected function configureBackgroundProcesses(string $envName, string $instanceName, ?string $instanceId, array $processes): void
     {
+        $existing = $instanceId ? $this->client->allBackgroundProcesses($instanceId) : [];
+        $matches = $this->matchBackgroundProcesses($envName, $instanceName, $processes, $existing);
+
         foreach ($processes as $processName => $processConfig) {
-            $processId = $this->state->getProcessId($envName, $instanceName, $processName);
-
             $processData = $this->buildProcessData($processConfig);
+            $process = $matches[$processName] ?? null;
 
-            if ($processId) {
+            if ($process) {
+                $processId = $process['id'];
+
+                if ($this->state->getProcessId($envName, $instanceName, $processName) !== $processId) {
+                    $this->line("      Found existing process {$processName}: {$processId}");
+                    $this->state->setProcessId($envName, $instanceName, $processName, $processId);
+                    $this->persistState();
+                }
+
+                if ($this->processHasSettings($process, $processData)) {
+                    $this->line("      Process up to date: {$processName}");
+
+                    continue;
+                }
+
                 $this->line("      Updating process: {$processName}");
 
                 if ($this->isDryRun) {
-                    $this->warn('        [DRY RUN] Would update process');
+                    $this->warn('        [DRY RUN] Would update process with: '.json_encode($processData));
 
                     continue;
                 }
 
                 $this->client->updateBackgroundProcess($processId, $processData);
-            } else {
-                $this->line("      Creating process: {$processName}");
 
-                if ($this->isDryRun) {
-                    $this->warn('        [DRY RUN] Would create process');
+                continue;
+            }
 
+            $this->line("      Creating process: {$processName}");
+
+            if ($this->isDryRun) {
+                $this->warn('        [DRY RUN] Would create process with: '.json_encode($processData));
+
+                continue;
+            }
+
+            $response = $this->client->createBackgroundProcess($instanceId, $processData);
+            $processId = $response['data']['id'];
+            $this->state->setProcessId($envName, $instanceName, $processName, $processId);
+            $this->persistState();
+        }
+    }
+
+    /**
+     * Pair each configured process with one already running on the instance.
+     *
+     * Background processes have no name in Cloud. The ID in the state file
+     * wins if that process still exists. Otherwise a process is matched on
+     * its settings: first one with exactly the configured settings, then one
+     * of the same type with the same queue connection and queues (workers)
+     * or the same command (custom processes). Each existing process is used
+     * at most once, so two configured workers never share one.
+     *
+     * @param  array<string, array<string, mixed>>  $processes
+     * @param  array<int, array<string, mixed>>  $existing
+     * @return array<string, array<string, mixed>> Existing processes keyed by configured name
+     */
+    protected function matchBackgroundProcesses(string $envName, string $instanceName, array $processes, array $existing): array
+    {
+        $available = [];
+
+        foreach ($existing as $process) {
+            $available[$process['id']] = $process;
+        }
+
+        $matches = [];
+
+        foreach (array_keys($processes) as $processName) {
+            $processId = $this->state->getProcessId($envName, $instanceName, $processName);
+
+            if ($processId !== null && isset($available[$processId])) {
+                $matches[$processName] = $available[$processId];
+                unset($available[$processId]);
+            }
+        }
+
+        $matchers = [
+            fn (array $process, array $data) => $this->processHasSettings($process, $data),
+            fn (array $process, array $data) => $this->processIsSameKind($process, $data),
+        ];
+
+        foreach ($matchers as $matcher) {
+            foreach ($processes as $processName => $processConfig) {
+                if (isset($matches[$processName])) {
                     continue;
                 }
 
-                $response = $this->client->createBackgroundProcess($instanceId, $processData);
-                $processId = $response['data']['id'];
-                $this->state->setProcessId($envName, $instanceName, $processName, $processId);
-                $this->state->save();
+                $processData = $this->buildProcessData($processConfig);
+
+                foreach ($available as $processId => $process) {
+                    if ($matcher($process, $processData)) {
+                        $matches[$processName] = $process;
+                        unset($available[$processId]);
+
+                        break;
+                    }
+                }
             }
         }
+
+        return $matches;
+    }
+
+    /**
+     * Whether an existing process is the same type as the configured one and
+     * works the same queues (workers) or runs the same command (custom).
+     *
+     * @param  array<string, mixed>  $process
+     * @param  array<string, mixed>  $data
+     */
+    protected function processIsSameKind(array $process, array $data): bool
+    {
+        $attributes = $process['attributes'] ?? [];
+
+        if (($attributes['type'] ?? null) !== $data['type']) {
+            return false;
+        }
+
+        // Cloud builds a worker's command from its config, so only custom
+        // processes are compared on the command.
+        if ($data['type'] !== 'worker') {
+            return trim((string) ($attributes['command'] ?? '')) === trim((string) ($data['command'] ?? ''));
+        }
+
+        foreach (['connection', 'queue'] as $key) {
+            if (isset($data['config'][$key]) && ! $this->sameProcessSetting($key, $attributes['config'][$key] ?? null, $data['config'][$key])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Whether an existing process already has every configured setting.
+     *
+     * @param  array<string, mixed>  $process
+     * @param  array<string, mixed>  $data
+     */
+    protected function processHasSettings(array $process, array $data): bool
+    {
+        if (! $this->processIsSameKind($process, $data)) {
+            return false;
+        }
+
+        $attributes = $process['attributes'] ?? [];
+
+        if ((int) ($attributes['processes'] ?? 0) !== (int) $data['processes']) {
+            return false;
+        }
+
+        foreach ($data['config'] ?? [] as $key => $value) {
+            if (! $this->sameProcessSetting($key, $attributes['config'][$key] ?? null, $value)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    protected function sameProcessSetting(string $key, mixed $actual, mixed $expected): bool
+    {
+        if ($actual === null || $expected === null) {
+            return $actual === $expected;
+        }
+
+        if ($key === 'queue') {
+            $normalize = fn (mixed $queues) => implode(',', array_map('trim', explode(',', (string) $queues)));
+
+            return $normalize($actual) === $normalize($expected);
+        }
+
+        // The API returns JSON numbers and booleans; config values may be strings.
+        return $actual == $expected;
     }
 
     /**
@@ -590,18 +1034,21 @@ class CloudDeployCommand extends Command
 
                 if ($domain) {
                     $domainId = $domain['id'];
+                    $this->line("    Found existing domain {$domainName}: {$domainId}");
                     $this->state->setDomainId($envName, $domainName, $domainId);
-                    $this->state->save();
+                    $this->persistState();
                 }
             }
 
-            $domainData = [
-                'name' => $domainName,
-                'www_redirect' => $domainConfig['www_redirect'] ?? null,
-                'wildcard_enabled' => $domainConfig['wildcard'] ?? false,
-            ];
-
             if ($domainId) {
+                // The API only lets you change a domain's verification method.
+                // Redirect and wildcard settings are fixed once it exists.
+                if (! isset($domainConfig['verification_method'])) {
+                    $this->line("    Domain exists: {$domainName}");
+
+                    continue;
+                }
+
                 $this->line("    Updating domain: {$domainName}");
 
                 if ($this->isDryRun) {
@@ -610,8 +1057,17 @@ class CloudDeployCommand extends Command
                     continue;
                 }
 
-                $this->client->updateDomain($domainId, $domainData);
+                $this->client->updateDomain($domainId, [
+                    'verification_method' => $domainConfig['verification_method'],
+                ]);
             } else {
+                $domainData = array_filter([
+                    'name' => $domainName,
+                    'www_redirect' => $domainConfig['www_redirect'] ?? null,
+                    'wildcard_enabled' => $domainConfig['wildcard'] ?? false,
+                    'verification_method' => $domainConfig['verification_method'] ?? null,
+                ], fn ($value) => $value !== null);
+
                 $this->line("    Creating domain: {$domainName}");
 
                 if ($this->isDryRun) {
@@ -623,7 +1079,7 @@ class CloudDeployCommand extends Command
                 $response = $this->client->createDomain($environmentId, $domainData);
                 $domainId = $response['data']['id'];
                 $this->state->setDomainId($envName, $domainName, $domainId);
-                $this->state->save();
+                $this->persistState();
             }
         }
     }
@@ -638,11 +1094,11 @@ class CloudDeployCommand extends Command
             return;
         }
 
+        // The deployment ID isn't kept in the state file. It would change the
+        // file on every deploy, and nothing reads it back.
         $response = $this->client->initiateDeployment($environmentId);
         $deploymentId = $response['data']['id'];
 
-        $this->state->setLastDeploymentId($envName, $deploymentId);
-        $this->state->save();
         $this->info("    Deployment initiated: {$deploymentId}");
 
         $this->line('    Waiting for deployment to complete...');
@@ -658,7 +1114,7 @@ class CloudDeployCommand extends Command
 
         $finalStatus = $deployment['data']['attributes']['status'] ?? 'unknown';
 
-        if (in_array($finalStatus, ['deployed', 'deployment.succeeded'])) {
+        if (DeploymentStatus::tryFrom($finalStatus)?->isSuccessful()) {
             $this->info('    Deployment successful!');
         } else {
             $failureReason = $deployment['data']['attributes']['failure_reason'] ?? 'Unknown error';
